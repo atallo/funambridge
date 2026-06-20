@@ -1,0 +1,28 @@
+# Ejemplo de configuración de funambridge.
+# El fichero real es config.yaml (excluido de git). Normalmente se gestiona
+# desde el panel web, no a mano. En Docker, móntalo en /data/config.yaml.
+
+s3:
+  host: 0.0.0.0       # un único puerto: S3 + WebDAV + panel web.
+  port: 9000          # 0.0.0.0 = accesible desde tu LAN / red Docker.
+
+admin:
+  enabled: true       # pon false para deshabilitar el panel /_admin.
+
+# Verifica la firma AWS SigV4 en las peticiones S3 (el secret_key debe ser
+# correcto). Detrás de un proxy HTTPS, debe reenviar X-Forwarded-Host para que
+# el Host firmado coincida; si tu proxy no puede, pon esto en false.
+verify_s3_signature: true
+
+accounts:
+  - name: personal
+    base_url: https://cloud.o2online.es
+    access_key: FBXXXXXXXXXXXXXXXXXX      # regenerar/fijar desde el panel
+    secret_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    device_id: funambridge-xxxxxxxxxxxx
+    s3_enabled: true                       # exponer esta cuenta por S3
+    webdav_enabled: true                   # exponer esta cuenta por WebDAV
+    # Se rellena al añadir la cuenta (subir HAR / pegar cookies).
+    oauth: {accesstoken: "", refreshtoken: "", platform: web, expiresin: "",
+            lastrefreshdate: 0, msisdn: "", captured_at: ""}
+    session: {jsessionid: "", validationkey: "", plc: "", captured_at: ""}

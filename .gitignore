@@ -1,0 +1,17 @@
+# Datos sensibles / de ejecución -- NUNCA subir
+config.yaml
+data/
+ca/
+*.har
+*.xapk
+*.apk
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
