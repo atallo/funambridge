@@ -1,0 +1,16 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.har
+*.xapk
+*.apk
+*.exe
+config.yaml
+data/
+ca/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/

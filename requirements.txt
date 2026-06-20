@@ -1,0 +1,2 @@
+# funambridge (Python 3.9+). Solo una dependencia; el resto es stdlib.
+PyYAML>=5.4
