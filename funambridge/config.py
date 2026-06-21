@@ -76,6 +76,7 @@ class Account:
     device_id: str = field(default_factory=lambda: "funambridge-" + uuid.uuid4().hex[:12])
     s3_enabled: bool = True
     webdav_enabled: bool = True
+    cache_seconds: int = 15     # caché de escritura tras subir (0 = desactivada)
     oauth: OAuth = field(default_factory=OAuth)
     session: Session = field(default_factory=Session)
 
@@ -117,6 +118,10 @@ class Config:
     s3_port: int = 9000
     admin_enabled: bool = True
     verify_s3_signature: bool = True
+    log_file: str = ""          # si se indica, escribe un log extendido (DEBUG) ahí
+    root_bucket: str = "raiz"   # bucket S3 virtual = raíz de O2 (ficheros sueltos); "" = off
+    tls_cert: str = ""          # si cert+key, sirve HTTPS directamente (autofirmado si no existen)
+    tls_key: str = ""
     accounts: list = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -202,6 +207,9 @@ class Config:
             "s3": {"host": self.s3_host, "port": self.s3_port},
             "admin": {"enabled": self.admin_enabled},
             "verify_s3_signature": self.verify_s3_signature,
+            "log_file": self.log_file,
+            "root_bucket": self.root_bucket,
+            "tls": {"cert": self.tls_cert, "key": self.tls_key},
             "accounts": [{
                 "name": a.name,
                 "base_url": a.base_url,
@@ -210,6 +218,7 @@ class Config:
                 "device_id": a.device_id,
                 "s3_enabled": a.s3_enabled,
                 "webdav_enabled": a.webdav_enabled,
+                "cache_seconds": a.cache_seconds,
                 "oauth": asdict(a.oauth),
                 "session": asdict(a.session),
             } for a in self.accounts],
@@ -235,6 +244,13 @@ def load(path):
     cfg.s3_port = int(s3.get("port", cfg.s3_port))
     cfg.admin_enabled = bool((data.get("admin") or {}).get("enabled", True))
     cfg.verify_s3_signature = bool(data.get("verify_s3_signature", True))
+    cfg.log_file = data.get("log_file", "") or ""
+    cfg.root_bucket = data.get("root_bucket", "raiz")
+    if cfg.root_bucket is None:
+        cfg.root_bucket = ""
+    tls = data.get("tls") or {}
+    cfg.tls_cert = tls.get("cert", "") or ""
+    cfg.tls_key = tls.get("key", "") or ""
     for a in data.get("accounts") or []:
         o = a.get("oauth") or {}
         cfg.accounts.append(Account(
@@ -245,6 +261,7 @@ def load(path):
             device_id=a.get("device_id") or ("funambridge-" + uuid.uuid4().hex[:12]),
             s3_enabled=bool(a.get("s3_enabled", True)),
             webdav_enabled=bool(a.get("webdav_enabled", True)),
+            cache_seconds=int(a.get("cache_seconds", 15) or 0),
             oauth=OAuth(
                 accesstoken=o.get("accesstoken", ""),
                 refreshtoken=o.get("refreshtoken", ""),

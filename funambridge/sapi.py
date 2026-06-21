@@ -19,11 +19,23 @@ from the APK -- see docs/apk-auth-ref/):
 import base64
 import http.cookiejar
 import json
+import logging
+import re
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+
+log = logging.getLogger("funambridge.sapi")
+
+
+def _redact(url):
+    # never write the CSRF validationkey or download tokens to the log
+    url = re.sub(r"(validationkey=)[^&]+", r"\1<redacted>", url, flags=re.I)
+    url = re.sub(r"([?&]k=)[^&]+", r"\1<redacted>", url)
+    return url
+
 
 SAPI = {
     "login":       "/sapi/login?action=login",
@@ -174,6 +186,8 @@ class FunambolClient:
 
     def _raw(self, method, path, *, data=None, headers=None, extra_query=None):
         url = self._url(path, extra_query)
+        log.debug("SAPI -> %s %s%s", method, _redact(url),
+                  f" ({len(data)}B body)" if data else "")
         req = urllib.request.Request(url, data=data, method=method,
                                      headers=self._headers(headers))
         try:
@@ -181,6 +195,8 @@ class FunambolClient:
         except urllib.error.HTTPError as e:
             self._absorb_refreshed_token(e)
             body = e.read()
+            log.debug("SAPI <- %s %s HTTP %s: %s", method, _redact(url), e.code,
+                      body[:300].decode("utf-8", "replace"))
             if e.code in (401, 403):
                 raise SessionExpired(
                     f"{method} {path}: unauthorized (HTTP {e.code}); tokens may "
@@ -188,7 +204,10 @@ class FunambolClient:
             raise SapiError(f"{method} {path} -> HTTP {e.code}: "
                             f"{body[:160].decode('utf-8','replace')}", status=e.code)
         except urllib.error.URLError as e:
+            log.debug("SAPI xx %s %s connection error: %s", method, _redact(url),
+                      e.reason)
             raise SapiError(f"{method} {path} -> connection error: {e.reason}")
+        log.debug("SAPI <- %s %s HTTP %s", method, _redact(url), resp.status)
         self._absorb_refreshed_token(resp)
         if self.cookie_mode:
             # the server may rotate validationKey via Set-Cookie; keep the query
@@ -274,8 +293,27 @@ class FunambolClient:
 
     def create_folder(self, parent_id, name):
         body = json.dumps({"data": {"name": name, "parentid": parent_id}}).encode()
-        return str(first(self._call("POST", SAPI["folder_save"], data=body,
-                   headers={"Content-Type": "application/json"}), "id", "folderid"))
+        d = self._call("POST", SAPI["folder_save"], data=body,
+                       headers={"Content-Type": "application/json"})
+        fid = first(d, "id", "folderid")
+        if fid is None:
+            sub = first(d, "folder")          # nested {"folder":{"id":..}}
+            if isinstance(sub, dict):
+                fid = first(sub, "id", "folderid")
+        if fid is None:
+            subs = as_list(d, "folders", "folder")   # {"folders":[{"id":..}]}
+            if subs:
+                fid = first(subs[0], "id", "folderid")
+        if fid is None:
+            # The save returned no id in any known shape: re-list the parent and
+            # find the just-created folder by name (never return "None").
+            for f in self.list_folders(parent_id):
+                if str(first(f, "name", "foldername")) == name:
+                    fid = first(f, "id", "folderid")
+                    break
+        if fid is None:
+            raise SapiError(f"create_folder('{name}'): no folder id in response")
+        return str(fid)
 
     def delete_folder(self, fid):
         self._call("GET", SAPI["folder_del"], extra_query={"id": fid})
@@ -287,6 +325,8 @@ class FunambolClient:
     MEDIA_FIELDS = ["name", "size", "modificationdate", "creationdate", "etag"]
 
     def list_media(self, folder_id, limit=200):
+        if folder_id is None or str(folder_id) in ("", "None"):
+            raise SapiError(f"list_media: invalid folder id {folder_id!r}")
         items, offset = [], 0
         body = json.dumps({"data": {"fields": self.MEDIA_FIELDS}}).encode()
         while True:

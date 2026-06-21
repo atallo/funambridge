@@ -14,6 +14,18 @@ admin:
 # el Host firmado coincida; si tu proxy no puede, pon esto en false.
 verify_s3_signature: true
 
+# Bucket S3 virtual que expone los ficheros sueltos en la raíz de O2 (que
+# ListBuckets no puede mostrar). "" lo desactiva. (En WebDAV la raíz ya los lista.)
+root_bucket: raiz
+
+# TLS integrado opcional, para clientes S3/WebDAV que exigen HTTPS sin un proxy
+# TLS delante. Si das cert+key y no existen, se generan autofirmados (en el
+# cliente, marca "aceptar certificado no fiable"). Déjalo vacío si terminas TLS
+# en tu propio proxy HTTPS.
+tls:
+  cert: ""    # p.ej. /data/funambridge-cert.pem
+  key: ""     # p.ej. /data/funambridge-key.pem
+
 accounts:
   - name: personal
     base_url: https://cloud.o2online.es
@@ -22,6 +34,7 @@ accounts:
     device_id: funambridge-xxxxxxxxxxxx
     s3_enabled: true                       # exponer esta cuenta por S3
     webdav_enabled: true                   # exponer esta cuenta por WebDAV
+    cache_seconds: 15                      # caché tras subir (segundos; 0 = off)
     # Se rellena al añadir la cuenta (subir HAR / pegar cookies).
     oauth: {accesstoken: "", refreshtoken: "", platform: web, expiresin: "",
             lastrefreshdate: 0, msisdn: "", captured_at: ""}
