@@ -9,8 +9,9 @@ to talk to O2 Cloud.
 """
 
 import datetime as _dt
-import hashlib
+import os
 import re
+import tempfile
 import threading
 import urllib.parse
 import uuid
@@ -33,6 +34,10 @@ class Registry:
         self._lock = threading.RLock()
         self._stores = {}   # access_key -> Store
 
+    def _cache_base(self):
+        return (self.config.cache_dir
+                or os.path.join(tempfile.gettempdir(), "funambridge-cache"))
+
     def store_for(self, access_key):
         with self._lock:
             acc = self.config.by_access_key(access_key)
@@ -51,8 +56,10 @@ class Registry:
                 client = FunambolClient(acc.base_url, acc.device_id,
                                         oauth=acc.oauth, session=acc.session,
                                         on_token_refresh=_persist)
+                disk_dir = os.path.join(self._cache_base(), access_key)
                 st = Store(client, cache_ttl=acc.cache_seconds,
-                           root_bucket=self.config.root_bucket)
+                           root_bucket=self.config.root_bucket,
+                           disk_dir=disk_dir)
                 self._stores[access_key] = st
             return st, acc
 
@@ -553,21 +560,7 @@ class S3Handler(BaseHTTPRequestHandler):
         self._send_xml(200, xml)
 
     def _get_object(self, store, bucket, key):
-        result = store.get_object(bucket, key)
-        if result is None:
+        dl = store.get_object(bucket, key)
+        if dl is None:
             return self._error(404, "NoSuchKey", key)
-        data, ctype = result
-        rng = self.headers.get("Range")
-        if rng and rng.startswith("bytes="):
-            try:
-                a, _, b = rng[6:].partition("-")
-                start = int(a) if a else 0
-                end = int(b) if b else len(data) - 1
-                end = min(end, len(data) - 1)
-                chunk = data[start:end + 1]
-                return self._send_bytes(206, chunk, ctype,
-                    {"Content-Range": f"bytes {start}-{end}/{len(data)}"})
-            except ValueError:
-                pass
-        self._send_bytes(200, data, ctype,
-                         {"ETag": f'"{hashlib.md5(data).hexdigest()}"'})
+        webdav.send_download(self, dl, self.headers.get("Range"))

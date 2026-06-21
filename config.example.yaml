@@ -26,6 +26,11 @@ tls:
   cert: ""    # p.ej. /data/funambridge-cert.pem
   key: ""     # p.ej. /data/funambridge-key.pem
 
+# La caché de escritura guarda en memoria hasta 256 MB de contenido; lo que no
+# cabe se vuelca a disco aquí (un fichero por entrada) y se sirve en streaming.
+# "" = directorio temporal del sistema. En Docker conviene un subdir del volumen.
+cache_dir: ""   # p.ej. /data/cache
+
 accounts:
   - name: personal
     base_url: https://cloud.o2online.es
