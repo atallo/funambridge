@@ -20,6 +20,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import tempfile
 import threading
 import time
 
@@ -30,6 +31,47 @@ log = logging.getLogger("funambridge.store")
 # memory budget for cached file *content* (metadata is always kept while fresh);
 # content above the remaining budget is spilled to disk instead.
 _CONTENT_BUDGET = 256 * 1024 * 1024
+
+# An incoming upload is read into RAM up to this size; bigger ones spill to a
+# temp file on disk as they stream in, so a large PUT never sits in memory.
+_SPOOL_MAX = 16 * 1024 * 1024
+
+
+def read_upload(reader, length, spill_dir, mem_max=None):
+    """Read exactly `length` bytes from `reader`, keeping them in RAM if small or
+    spilling to a temp file on disk if large, computing the md5 in one pass.
+    Returns (data_or_None, path_or_None, total_read, md5_hex)."""
+    if mem_max is None:
+        mem_max = _SPOOL_MAX
+    h = hashlib.md5()
+    buf = bytearray()
+    path = fh = None
+    total = 0
+    remaining = length
+    try:
+        while remaining > 0:
+            chunk = reader.read(min(1 << 20, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            total += len(chunk)
+            h.update(chunk)
+            if path is None:
+                buf.extend(chunk)
+                if len(buf) > mem_max:                # roll over to disk
+                    os.makedirs(spill_dir, exist_ok=True)
+                    fd, path = tempfile.mkstemp(suffix=".up", dir=spill_dir)
+                    fh = os.fdopen(fd, "wb")
+                    fh.write(buf)
+                    buf = bytearray()
+            else:
+                fh.write(chunk)
+    finally:
+        if fh:
+            fh.close()
+    if path is None:
+        return bytes(buf), None, total, h.hexdigest()
+    return None, path, total, h.hexdigest()
 
 
 class _WriteCache:
@@ -54,15 +96,42 @@ class _WriteCache:
     def _room(self):
         return _CONTENT_BUDGET - self._bytes
 
+    def _disk_path(self, key):
+        h = hashlib.sha256("/".join(key).encode("utf-8", "replace")).hexdigest()[:32]
+        return os.path.join(self.disk_dir, h + ".bin")
+
     def _spill(self, key, data):
         os.makedirs(self.disk_dir, exist_ok=True)
-        h = hashlib.sha256("/".join(key).encode("utf-8", "replace")).hexdigest()[:32]
-        path = os.path.join(self.disk_dir, h + ".bin")
+        path = self._disk_path(key)
         tmp = path + ".tmp"
         with open(tmp, "wb") as fh:
             fh.write(data)
         os.replace(tmp, path)
         return path
+
+    def put_path(self, parts, size, etag, ctype, src_path, media_id=None):
+        """Adopt an already-written file (a streamed upload's temp file) as this
+        entry's on-disk content, by moving it into the cache dir. Returns True if
+        adopted (caller must not delete src_path then), False otherwise."""
+        if self.ttl <= 0 or not self.disk_dir:
+            return False
+        with self._lock:
+            key = tuple(parts)
+            self._drop(key)
+            try:
+                os.makedirs(self.disk_dir, exist_ok=True)
+                dst = self._disk_path(key)
+                os.replace(src_path, dst)
+            except OSError as ex:
+                log.debug("cache adopt failed for %s: %s", "/".join(parts), ex)
+                return False
+            self._e[key] = {"ts": time.time(), "name": parts[-1], "size": size,
+                            "etag": etag, "ctype": ctype, "data": None,
+                            "disk": dst, "id": media_id,
+                            "mtime": int(time.time() * 1000)}
+            log.debug("cache put %s (%dB, ttl=%ss, disk-adopt)",
+                      "/".join(parts), size, self.ttl)
+            return True
 
     def put(self, parts, size, etag, ctype, data, media_id=None):
         if self.ttl <= 0:
@@ -415,21 +484,66 @@ class Store:
                 self._index_pop(folder_id, fname)
         self.cache.drop(parts)
 
+    def _finish_put(self, parts, total, md5, content_type, data, path):
+        """Shared tail of every upload: overwrite any prior copy, push the bytes
+        (from RAM `data` or the temp file `path`) to O2, update the index and the
+        write cache. Exactly one of `data`/`path` is set."""
+        fid = self.resolve_folder(parts[:-1], create=True)
+        fname = parts[-1]
+        adopted = False
+        try:
+            with self._put_lock(fid, fname):
+                self._overwrite(parts, fid, fname)
+                if data is not None:
+                    new_id = self.c.upload(fid, fname, total, data, content_type)
+                    self._index_set(fid, fname, new_id, total,
+                                    int(time.time() * 1000), md5)
+                    self.cache.put(parts, total, md5, content_type, data,
+                                   media_id=new_id)
+                else:
+                    with open(path, "rb") as fh:
+                        new_id = self.c.upload(fid, fname, total, fh, content_type)
+                    self._index_set(fid, fname, new_id, total,
+                                    int(time.time() * 1000), md5)
+                    adopted = self.cache.put_path(parts, total, md5, content_type,
+                                                  path, media_id=new_id)
+            return md5
+        finally:
+            if path is not None and not adopted:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
     def put_object(self, bucket, key, data, content_type):
         dirs, fname = self._split_key(key)
         if fname is None:
             raise ValueError("empty key")
         parts = self._base_parts(bucket) + dirs + [fname]
-        fid = self.resolve_folder(parts[:-1], create=True)
-        with self._put_lock(fid, fname):
-            self._overwrite(parts, fid, fname)
-            new_id = self.c.upload(fid, fname, data, content_type)
-            etag = hashlib.md5(data).hexdigest()
-            self._index_set(fid, fname, new_id, len(data),
-                            int(time.time() * 1000), etag)
-            self.cache.put(parts, len(data), etag, content_type, data,
-                           media_id=new_id)
-        return etag
+        return self._finish_put(parts, len(data), hashlib.md5(data).hexdigest(),
+                                content_type, data, None)
+
+    def put_object_stream(self, bucket, key, size, content_type, reader):
+        dirs, fname = self._split_key(key)
+        if fname is None:
+            raise ValueError("empty key")
+        return self.put_stream(self._base_parts(bucket) + dirs + [fname],
+                               size, content_type, reader)
+
+    def put_stream(self, parts, size, content_type, reader):
+        """Stream an upload of declared length `size` from `reader` (the request
+        body) without buffering the whole file in RAM."""
+        parts = list(parts)
+        spill = self.cache.disk_dir or tempfile.gettempdir()
+        data, path, total, md5 = read_upload(reader, size, spill)
+        if total != size:
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            raise ValueError(f"incomplete upload: got {total} of {size} bytes")
+        return self._finish_put(parts, total, md5, content_type, data, path)
 
     def delete_object(self, bucket, key):
         dirs, fname = self._split_key(key)
@@ -503,17 +617,8 @@ class Store:
     def put_file(self, parts, data, content_type):
         if not parts:
             raise ValueError("no file name")
-        parts = list(parts)
-        parent = self.resolve_folder(parts[:-1], create=True)
-        fname = parts[-1]
-        with self._put_lock(parent, fname):
-            self._overwrite(parts, parent, fname)
-            new_id = self.c.upload(parent, fname, data, content_type)
-            etag = hashlib.md5(data).hexdigest()
-            self._index_set(parent, fname, new_id, len(data),
-                            int(time.time() * 1000), etag)
-            self.cache.put(parts, len(data), etag, content_type, data,
-                           media_id=new_id)
+        self._finish_put(list(parts), len(data), hashlib.md5(data).hexdigest(),
+                         content_type, data, None)
 
     def make_dir(self, parts):
         self.resolve_folder(list(parts), create=True)

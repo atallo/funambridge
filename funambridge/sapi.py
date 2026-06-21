@@ -187,8 +187,16 @@ class FunambolClient:
 
     def _raw(self, method, path, *, data=None, headers=None, extra_query=None):
         url = self._url(path, extra_query)
+        # data may be bytes or a seekable file-like (streamed upload); rewind so
+        # a retry (token refresh) re-sends from the start instead of EOF.
+        if data is not None and hasattr(data, "seek"):
+            try:
+                data.seek(0)
+            except (OSError, ValueError):
+                pass
+        n = len(data) if isinstance(data, (bytes, bytearray)) else None
         log.debug("SAPI -> %s %s%s", method, _redact(url),
-                  f" ({len(data)}B body)" if data else "")
+                  f" ({n}B body)" if n is not None else (" (stream)" if data else ""))
         req = urllib.request.Request(url, data=data, method=method,
                                      headers=self._headers(headers))
         try:
@@ -354,12 +362,15 @@ class FunambolClient:
     def storage_space(self):
         return self._call("GET", SAPI["storage"])
 
-    def upload(self, folder_id, name, data, content_type="application/octet-stream"):
+    def upload(self, folder_id, name, size, body, content_type="application/octet-stream"):
         # Two-step upload (as the official client does):
         #  1) save-metadata -> returns the new item id;
         #  2) POST the bytes with X-funambol-id = that id.
+        # `body` is bytes or a seekable file-like of exactly `size` bytes; with a
+        # file-like + explicit Content-Length, http.client streams it in blocks
+        # (the whole file never has to sit in memory).
         ctype = content_type or "application/octet-stream"
-        meta = {"data": {"name": name, "size": len(data),
+        meta = {"data": {"name": name, "size": size,
                          "contenttype": ctype, "folderid": folder_id}}
         d = self._call("POST", "/sapi/upload/file?action=save-metadata",
                        data=json.dumps(meta).encode(),
@@ -367,9 +378,10 @@ class FunambolClient:
         new_id = first(d, "id", "mediaid")
         if not new_id:
             raise SapiError("upload: save-metadata returned no id")
-        self._call("POST", "/sapi/upload/file?action=save", data=data,
+        self._call("POST", "/sapi/upload/file?action=save", data=body,
                    headers={"Content-Type": ctype,
-                            "X-funambol-file-size": str(len(data)),
+                            "Content-Length": str(size),
+                            "X-funambol-file-size": str(size),
                             "X-funambol-id": str(new_id)})
         return str(new_id)
 

@@ -515,11 +515,24 @@ class S3Handler(BaseHTTPRequestHandler):
         if bucket is None:
             return self._error(400, "InvalidRequest", "missing bucket")
         if key == "":
+            self._read_body()                       # drain any body, then create
             store.create_bucket(bucket)
             return self._send_bytes(200, b"", "application/xml")
-        data = self._read_body()
         ctype = self.headers.get("Content-Type", "application/octet-stream")
-        etag = store.put_object(bucket, key, data, ctype)
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        ce = self.headers.get("Content-Encoding", "") or ""
+        sha = str(self.headers.get("x-amz-content-sha256", ""))
+        aws_chunked = "aws-chunked" in ce or sha.startswith("STREAMING-")
+        if aws_chunked:
+            # aws-chunked framing is decoded in RAM (correctness over memory)
+            etag = store.put_object(bucket, key, self._read_body(), ctype)
+        else:
+            try:
+                etag = store.put_object_stream(bucket, key, length, ctype,
+                                               self.rfile)
+            except Exception:        # body half-read -> connection unsafe to reuse
+                self.close_connection = True
+                raise
         return self._send_bytes(200, b"", "application/xml",
                                 {"ETag": f'"{etag}"'})
 
