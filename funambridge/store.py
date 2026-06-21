@@ -132,6 +132,23 @@ class _WriteCache:
                     self._drop(k)
         return out
 
+    def snapshot(self):
+        """Current entries for the admin view: path, size, where, expiry (s)."""
+        now = time.time()
+        out = []
+        with self._lock:
+            for k, e in self._e.items():
+                if not self._fresh(e):
+                    continue
+                where = ("disco" if e.get("disk")
+                         else "memoria" if e.get("data") is not None
+                         else "solo metadatos")
+                out.append({"path": "/".join(k), "size": e["size"],
+                            "where": where,
+                            "expires_in": max(0.0, self.ttl - (now - e["ts"]))})
+        out.sort(key=lambda x: x["path"])
+        return out
+
 
 def _synth(e):
     """Build a media-item-like dict from a cache entry (marked _cached)."""
@@ -160,6 +177,15 @@ class Store:
         self.c = client
         self._lock = threading.RLock()
         self._folder_cache = {}
+        # Per-folder {name: id} index. Loaded once per folder, then kept in sync
+        # with our own uploads/deletes, so a PUT can check for an existing
+        # same-name item in O(1) instead of re-listing the whole folder, and so
+        # it still finds a copy we just uploaded that the server has not made
+        # visible yet (a fresh listing or the short write-cache would miss it).
+        self._media_index = {}            # folder_id(str) -> {name: id}
+        self._mi_lock = threading.RLock()
+        # Fixed pool of locks to serialize PUTs of the same (folder, name).
+        self._put_locks = [threading.Lock() for _ in range(64)]
         self.cache = _WriteCache(cache_ttl, disk_dir=disk_dir)
         # A fresh Store starts with an empty index, so any spill files left in
         # disk_dir by a previous run are orphans -- clear them.
@@ -181,6 +207,7 @@ class Store:
         if self.root_bucket and bucket == self.root_bucket:
             return []
         return [bucket]
+
 
     # -- folder resolution --------------------------------------------------
     def _children_folders(self, parent_id):
@@ -218,6 +245,60 @@ class Store:
     def invalidate(self):
         with self._lock:
             self._folder_cache.clear()
+
+    # -- per-folder media index (name -> {id,size,modified,etag}) -----------
+    def _media_index_for(self, folder_id):
+        """A folder's media indexed by name, loaded once then kept in sync with
+        our own uploads/deletes. Lets PUT dedup and reads (list/HEAD/find) be
+        served without re-listing the whole folder each time."""
+        fid = str(folder_id)
+        with self._mi_lock:
+            idx = self._media_index.get(fid)
+            if idx is not None:
+                return idx
+        loaded = {}
+        for m in self.c.list_media(folder_id):       # one-time scan per folder
+            nm = first(m, "name", "filename")
+            mid = first(m, "id", "mediaid")
+            if nm is not None and mid is not None:
+                loaded[str(nm)] = {
+                    "id": str(mid),
+                    "size": int(first(m, "size", "filesize") or 0),
+                    "modified": first(m, "modificationdate", "creationdate"),
+                    "etag": str(first(m, "etag", "id") or ""),
+                }
+        with self._mi_lock:
+            idx = self._media_index.get(fid)
+            if idx is None:
+                self._media_index[fid] = loaded
+                idx = loaded
+            return idx
+
+    def _index_set(self, folder_id, name, mid, size, modified, etag):
+        with self._mi_lock:
+            idx = self._media_index.get(str(folder_id))
+        if idx is not None:
+            idx[name] = {"id": str(mid), "size": int(size),
+                         "modified": modified, "etag": etag}
+
+    def _index_pop(self, folder_id, name):
+        with self._mi_lock:
+            idx = self._media_index.get(str(folder_id))
+        if idx is not None:
+            idx.pop(name, None)
+
+    @staticmethod
+    def _item_from_index(name, ent):
+        """A media-item-like dict built from an index entry (for reads)."""
+        return {"id": ent["id"], "name": name, "size": ent["size"],
+                "modificationdate": ent.get("modified"),
+                "etag": ent.get("etag", "")}
+
+    def _put_lock(self, folder_id, name):
+        # Same (folder, name) always maps to the same lock, so two concurrent
+        # PUTs of one file can't both create it (O2 would keep 'name' AND
+        # 'name (1)'). The fixed pool bounds memory.
+        return self._put_locks[hash((str(folder_id), name)) % len(self._put_locks)]
 
     # -- buckets ------------------------------------------------------------
     def list_buckets(self):
@@ -260,17 +341,20 @@ class Store:
             return objects, sorted(common)
         base_prefix = "/".join(pdirs) + ("/" if pdirs else "")
         seen = set()
-        for m in self.c.list_media(base_id):
-            name = first(m, "name", "filename")
-            if name is None:
-                continue
-            self.cache.drop(base + pdirs + [str(name)])  # server has it now
-            full = base_prefix + str(name)
+        for name, ent in self._media_index_for(base_id).items():
+            full = base_prefix + name
             if not full.startswith(prefix):
                 continue
-            seen.add(str(name))
-            objects.append(self._obj(full, m))
-        for e in self.cache.children(base + pdirs):       # not-yet-visible uploads
+            seen.add(name)
+            e = self.cache.get(base + pdirs + [name])     # freshest size if cached
+            if e is not None:
+                objects.append({"key": full, "size": e["size"],
+                                "etag": e["etag"], "modified": e["mtime"]})
+            else:
+                objects.append({"key": full, "size": ent["size"],
+                                "etag": ent.get("etag", ""),
+                                "modified": ent.get("modified")})
+        for e in self.cache.children(base + pdirs):       # not-yet-indexed uploads
             if e["name"] in seen:
                 continue
             full = base_prefix + e["name"]
@@ -311,25 +395,25 @@ class Store:
         return self._download(m)
 
     def _overwrite(self, parts, folder_id, fname):
-        """A PUT replaces. Delete any current item with this name first, or O2
-        keeps the old one and stores the new upload as 'name (1).ext'. Covers
-        both a copy still only in the write cache (just uploaded, not yet
-        listable -- deleted by its server id) and one already visible."""
-        e = self.cache.get(parts)
-        if e and e.get("id"):
-            try:
-                self.c.delete_media(e["id"])
-            except SapiError as ex:
-                log.debug("overwrite: cached delete %s: %s", "/".join(parts), ex)
-        self.cache.drop(parts)
+        """A PUT replaces. Delete any current item with this name before
+        uploading, or O2 keeps the old one and stores the new one as
+        'name (1).ext'. Uses the per-folder name->id index, so it is O(1) per
+        PUT and also catches a copy we just uploaded that the server has not
+        made visible yet."""
         try:
-            for m in self.c.list_media(folder_id):
-                if str(first(m, "name", "filename")) == fname:
-                    mid = first(m, "id", "mediaid")
-                    if mid:
-                        self.c.delete_media(mid)
+            idx = self._media_index_for(folder_id)
         except SapiError as ex:
-            log.debug("overwrite: server scan %s: %s", fname, ex)
+            log.debug("overwrite: index load %s: %s", folder_id, ex)
+            idx = None
+        if idx is not None:
+            ent = idx.get(fname)
+            if ent:
+                try:
+                    self.c.delete_media(ent["id"])
+                except SapiError as ex:
+                    log.debug("overwrite: delete %s: %s", "/".join(parts), ex)
+                self._index_pop(folder_id, fname)
+        self.cache.drop(parts)
 
     def put_object(self, bucket, key, data, content_type):
         dirs, fname = self._split_key(key)
@@ -337,10 +421,14 @@ class Store:
             raise ValueError("empty key")
         parts = self._base_parts(bucket) + dirs + [fname]
         fid = self.resolve_folder(parts[:-1], create=True)
-        self._overwrite(parts, fid, fname)
-        new_id = self.c.upload(fid, fname, data, content_type)
-        etag = hashlib.md5(data).hexdigest()
-        self.cache.put(parts, len(data), etag, content_type, data, media_id=new_id)
+        with self._put_lock(fid, fname):
+            self._overwrite(parts, fid, fname)
+            new_id = self.c.upload(fid, fname, data, content_type)
+            etag = hashlib.md5(data).hexdigest()
+            self._index_set(fid, fname, new_id, len(data),
+                            int(time.time() * 1000), etag)
+            self.cache.put(parts, len(data), etag, content_type, data,
+                           media_id=new_id)
         return etag
 
     def delete_object(self, bucket, key):
@@ -367,14 +455,17 @@ class Store:
             raise KeyError("/".join(parts))
         names = sorted(self._children_folders(fid).keys())
         files, seen = [], set()
-        for m in self.c.list_media(fid):
-            nm = first(m, "name", "filename")
-            if nm is None:
-                continue
-            self.cache.drop(list(parts) + [str(nm)])      # server has it now
-            seen.add(str(nm))
-            files.append(self._obj(str(nm), m))
-        for e in self.cache.children(parts):              # not-yet-visible uploads
+        for nm, ent in self._media_index_for(fid).items():
+            seen.add(nm)
+            e = self.cache.get(list(parts) + [nm])        # freshest size if cached
+            if e is not None:
+                files.append({"key": nm, "size": e["size"],
+                              "etag": e["etag"], "modified": e["mtime"]})
+            else:
+                files.append({"key": nm, "size": ent["size"],
+                              "etag": ent.get("etag", ""),
+                              "modified": ent.get("modified")})
+        for e in self.cache.children(parts):              # not-yet-indexed uploads
             if e["name"] not in seen and e["name"] not in names:
                 files.append({"key": e["name"], "size": e["size"],
                               "etag": e["etag"], "modified": e["mtime"]})
@@ -383,14 +474,17 @@ class Store:
     def find_media(self, parts):
         if not parts:
             return None
+        e = self.cache.get(parts)
+        if e is not None:
+            return _synth(e)                 # just-uploaded: serve from cache
         parent = self.resolve_folder(list(parts[:-1]))
-        if parent is not None:
-            for m in self.c.list_media(parent):
-                if str(first(m, "name", "filename")) == parts[-1]:
-                    self.cache.drop(parts)
-                    return m
-        e = self.cache.get(parts)        # fall back to a just-uploaded file
-        return _synth(e) if e else None
+        if parent is None:
+            return None
+        try:
+            ent = self._media_index_for(parent).get(parts[-1])
+        except SapiError:
+            return None
+        return self._item_from_index(parts[-1], ent) if ent else None
 
     def _download(self, m):
         ctype = m.get("contenttype") or "application/octet-stream"
@@ -409,11 +503,17 @@ class Store:
     def put_file(self, parts, data, content_type):
         if not parts:
             raise ValueError("no file name")
-        parent = self.resolve_folder(list(parts[:-1]), create=True)
-        self._overwrite(list(parts), parent, parts[-1])
-        new_id = self.c.upload(parent, parts[-1], data, content_type)
-        etag = hashlib.md5(data).hexdigest()
-        self.cache.put(parts, len(data), etag, content_type, data, media_id=new_id)
+        parts = list(parts)
+        parent = self.resolve_folder(parts[:-1], create=True)
+        fname = parts[-1]
+        with self._put_lock(parent, fname):
+            self._overwrite(parts, parent, fname)
+            new_id = self.c.upload(parent, fname, data, content_type)
+            etag = hashlib.md5(data).hexdigest()
+            self._index_set(parent, fname, new_id, len(data),
+                            int(time.time() * 1000), etag)
+            self.cache.put(parts, len(data), etag, content_type, data,
+                           media_id=new_id)
 
     def make_dir(self, parts):
         self.resolve_folder(list(parts), create=True)
@@ -425,6 +525,8 @@ class Store:
         fid = self.resolve_folder(list(parts))
         if fid is not None:
             self.c.delete_folder(fid)
+            with self._mi_lock:
+                self._media_index.pop(str(fid), None)   # folder gone
             self.invalidate()
             return
         m = self.find_media(parts)
@@ -433,6 +535,9 @@ class Store:
             mid = first(m, "id", "mediaid")
             if mid:                       # cached items now carry the server id too
                 self.c.delete_media(mid)
+            parent = self.resolve_folder(list(parts[:-1]))
+            if parent is not None:
+                self._index_pop(parent, parts[-1])
 
     def download_path(self, parts):
         m = self.find_media(parts)

@@ -148,16 +148,17 @@ class FunambolClient:
         except Exception:  # noqa: BLE001
             return
         changed = False
-        for src, dst in (("accesstoken", "accesstoken"),
-                         ("refreshtoken", "refreshtoken"),
-                         ("expiresin", "expiresin"), ("msisdn", "msisdn")):
-            val = data.get(src)
-            if val:
-                setattr(self.oauth, dst, val)
+        with self._lock:        # guard shared token state under concurrency
+            for src, dst in (("accesstoken", "accesstoken"),
+                             ("refreshtoken", "refreshtoken"),
+                             ("expiresin", "expiresin"), ("msisdn", "msisdn")):
+                val = data.get(src)
+                if val:
+                    setattr(self.oauth, dst, val)
+                    changed = True
+            if "lastrefreshdate" in data:
+                self.oauth.lastrefreshdate = int(data.get("lastrefreshdate") or 0)
                 changed = True
-        if "lastrefreshdate" in data:
-            self.oauth.lastrefreshdate = int(data.get("lastrefreshdate") or 0)
-            changed = True
         if changed and self.on_token_refresh:
             try:
                 self.on_token_refresh(self.oauth)
@@ -212,9 +213,10 @@ class FunambolClient:
         if self.cookie_mode:
             # the server may rotate validationKey via Set-Cookie; keep the query
             # param in sync with whatever is now in the jar.
-            for c in self._jar:
-                if c.name == "validationKey" and c.value:
-                    self.validationkey = c.value
+            with self._lock:
+                for c in self._jar:
+                    if c.name == "validationKey" and c.value:
+                        self.validationkey = c.value
         return resp, resp.read()
 
     def _json(self, method, path, **kw):
@@ -225,7 +227,8 @@ class FunambolClient:
             raise SapiError(f"{method} {path}: non-JSON ({body[:80]!r})")
         d = payload.get("data") if isinstance(payload, dict) else None
         if isinstance(d, dict) and d.get("validationkey"):
-            self.validationkey = d["validationkey"]
+            with self._lock:
+                self.validationkey = d["validationkey"]
         if isinstance(payload, dict) and payload.get("error"):
             err = payload["error"]
             code = err.get("code") if isinstance(err, dict) else None
@@ -273,13 +276,16 @@ class FunambolClient:
 
     # -- folders ------------------------------------------------------------
     def root_id(self):
-        if self._root_id is None:
-            d = self._call("GET", SAPI["root_folder"])
-            folders = as_list(d, "folders", "folder")
-            fid = (first(folders[0], "id", "folderid") if folders
-                   else first(d, "id", "folderid"))
-            self._root_id = str(fid) if fid is not None else None
-        return self._root_id
+        if self._root_id is not None:
+            return self._root_id
+        with self._lock:                     # one-time init, guarded
+            if self._root_id is None:
+                d = self._call("GET", SAPI["root_folder"])
+                folders = as_list(d, "folders", "folder")
+                fid = (first(folders[0], "id", "folderid") if folders
+                       else first(d, "id", "folderid"))
+                self._root_id = str(fid) if fid is not None else None
+            return self._root_id
 
     def list_folders(self, parent_id):
         d = self._call("GET", SAPI["folder_get"],
