@@ -189,6 +189,13 @@ def render_page(cfg, msg="", err="", endpoint=None):
           </td>
           <td>{toggle(nm, "s3", a.s3_enabled)}</td>
           <td>{toggle(nm, "webdav", a.webdav_enabled)}</td>
+          <td>
+            <form method="post" action="{ADMIN_PREFIX}/cache" style="display:inline">
+              <input type="hidden" name="name" value="{nm}">
+              <input name="seconds" type="number" min="0" value="{a.cache_seconds}"
+                     style="width:58px" title="caché de escritura en segundos (0 = off)">
+              <button class="ghost">s</button></form>
+          </td>
           <td>{auth}</td>
           <td>
             <details><summary class="link">Renovar sesión</summary>
@@ -209,7 +216,7 @@ def render_page(cfg, msg="", err="", endpoint=None):
           </td>
         </tr>"""
     if not rows:
-        rows = ('<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">'
+        rows = ('<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">'
                 'No hay cuentas todavía. Pulsa «Añadir cuenta nueva».</td></tr>')
 
     banner = ""
@@ -282,29 +289,44 @@ def render_page(cfg, msg="", err="", endpoint=None):
  {banner}
 
  <div class="card">
-  <h2>Conexión &nbsp;·&nbsp; <span class="muted" style="text-transform:none;letter-spacing:0">{html.escape(s3ep)}</span></h2>
+  <h2>Conexión &nbsp;·&nbsp; <span id="cx-ep" class="muted" style="text-transform:none;letter-spacing:0">{html.escape(s3ep)}</span></h2>
   <div class="grid">
    <div>
     <div class="kv"><b>WebDAV</b></div>
-    <div class="kv"><b>URL</b> <code>{html.escape(s3ep)}</code></div>
+    <div class="kv"><b>URL</b> <code id="cx-url">{html.escape(s3ep)}</code></div>
     <div class="kv"><b>Usuario</b> el <code>access_key</code> de la cuenta</div>
     <div class="kv"><b>Contraseña</b> el <code>secret_key</code></div>
    </div>
    <div>
     <div class="kv"><b>S3</b></div>
-    <div class="kv"><b>Host</b> <code>{html.escape(host)}</code> <span class="muted small">(solo el host, sin http:// ni puerto)</span></div>
-    <div class="kv"><b>Puerto</b> <code>{html.escape(port)}</code></div>
-    <div class="kv"><b>TLS / cifrado</b> {tls} <span class="muted small">(detrás de tu proxy HTTPS: sí)</span></div>
-    <div class="kv"><b>Direccionamiento</b> path-style · firma verificada</div>
+    <div class="kv"><b>Host</b> <code id="cx-host">{html.escape(host)}</code> <span class="muted small">(solo el host, sin http:// ni puerto)</span></div>
+    <div class="kv"><b>Puerto</b> <code id="cx-port">{html.escape(port)}</code></div>
+    <div class="kv"><b>TLS / cifrado</b> <span id="cx-tls">{tls}</span></div>
+    <div class="kv"><b>Direccionamiento</b> <code>path-style</code> · firma verificada
+      <span class="muted small">(activa «path-style» en el cliente; con IP, virtual-host no funciona)</span></div>
+    {("<div class='kv'><b>Ficheros de la raíz</b> en el bucket virtual <code>"
+      + html.escape(cfg.root_bucket) + "</code></div>") if cfg.root_bucket else ""}
    </div>
   </div>
   <p class="muted small" style="margin:12px 0 0">El panel se deshabilita con <code>admin: {{enabled: false}}</code> en config.yaml.</p>
  </div>
+ <script>
+  (function(){{
+    var https = location.protocol === 'https:';
+    var port = location.port || (https ? '443' : '80');
+    var set = function(id,v){{var e=document.getElementById(id); if(e) e.textContent=v;}};
+    set('cx-ep', location.origin);
+    set('cx-url', location.origin);
+    set('cx-host', location.hostname);
+    set('cx-port', port);
+    set('cx-tls', https ? 'Sí (HTTPS)' : 'No (HTTP)');
+  }})();
+ </script>
 
  <div class="card">
   <h2>Cuentas</h2>
   <table>
-   <thead><tr><th>Cuenta</th><th>Claves</th><th>S3</th><th>WebDAV</th><th>Auth</th><th>Acciones</th></tr></thead>
+   <thead><tr><th>Cuenta</th><th>Claves</th><th>S3</th><th>WebDAV</th><th>Caché</th><th>Auth</th><th>Acciones</th></tr></thead>
    <tbody>{rows}</tbody>
   </table>
   <details class="add mt">

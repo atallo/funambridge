@@ -51,7 +51,8 @@ class Registry:
                 client = FunambolClient(acc.base_url, acc.device_id,
                                         oauth=acc.oauth, session=acc.session,
                                         on_token_refresh=_persist)
-                st = Store(client)
+                st = Store(client, cache_ttl=acc.cache_seconds,
+                           root_bucket=self.config.root_bucket)
                 self._stores[access_key] = st
             return st, acc
 
@@ -373,6 +374,18 @@ class S3Handler(BaseHTTPRequestHandler):
             cfg.save()
             return self._redirect(ADMIN_PREFIX + "/?msg=" +
                                   urllib.parse.quote(f"{what} {'on' if val else 'off'} en '{acc.name}'"))
+        if path == ADMIN_PREFIX + "/cache":
+            acc = cfg.by_name(form.get("name", [""])[0])
+            if acc is None:
+                return self._redirect(ADMIN_PREFIX + "/?err=cuenta+no+encontrada")
+            try:
+                acc.cache_seconds = max(0, int(form.get("seconds", ["0"])[0] or 0))
+            except ValueError:
+                return self._redirect(ADMIN_PREFIX + "/?err=valor+invalido")
+            cfg.save()
+            self.server.registry.drop(acc.access_key)   # recrea el Store con el TTL nuevo
+            return self._redirect(ADMIN_PREFIX + "/?msg=" +
+                                  urllib.parse.quote(f"caché {acc.cache_seconds}s en '{acc.name}'"))
         return self._error(404, "NoSuchKey", "admin route not found")
 
     # -- WebDAV detection ---------------------------------------------------

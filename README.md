@@ -49,6 +49,11 @@ Pon tu propio **proxy HTTPS** delante para TLS. Debe reenviar
 Host de la firma SigV4 coincida). Si tu proxy no puede, pon
 `verify_s3_signature: false` en `config.yaml`.
 
+Si un cliente S3/WebDAV exige HTTPS y no tienes proxy delante, usa el **TLS
+integrado**: `serve --tls-cert cert.pem --tls-key key.pem` (o la sección `tls`
+del config). Si los ficheros no existen, se generan autofirmados — marca
+"aceptar certificado no fiable" en el cliente.
+
 ## Añadir una cuenta
 
 Abre el panel (`http://<host>:9000/_admin/`) → botón **«＋ Añadir cuenta nueva»**.

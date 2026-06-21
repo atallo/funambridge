@@ -47,7 +47,17 @@ def cmd_serve(cfg):
     registry = Registry(cfg)
     s3 = Server((cfg.s3_host, cfg.s3_port), registry,
                 log=lambda m: log.info("%s", m))
-    base = f"http://{cfg.s3_host}:{cfg.s3_port}"
+    scheme = "http"
+    if cfg.tls_cert and cfg.tls_key:
+        from . import tls
+        try:
+            ctx = tls.server_context(cfg.tls_cert, cfg.tls_key)
+            s3.socket = ctx.wrap_socket(s3.socket, server_side=True)
+            scheme = "https"
+            log.info("TLS activado (cert=%s)", cfg.tls_cert)
+        except Exception as e:  # noqa: BLE001
+            log.error("TLS deshabilitado (%s); sirviendo HTTP", e)
+    base = f"{scheme}://{cfg.s3_host}:{cfg.s3_port}"
     if cfg.s3_host not in ("127.0.0.1", "localhost", "::1"):
         sig = "on" if cfg.verify_s3_signature else "OFF"
         log.warning("Binding %s -- reachable from your LAN/Docker network "
@@ -104,8 +114,8 @@ def cmd_probe(cfg, name):
     client.validate_session()
     print("session: VALID (tokens accepted)")
     from .store import Store
-    store = Store(client)
-    print("buckets (folders):", store.list_buckets() or "(none)")
+    store = Store(client, cache_ttl=acc.cache_seconds, root_bucket=cfg.root_bucket)
+    print("buckets:", store.list_buckets() or "(none)")
     try:
         print("storage:", str(client.storage_space())[:160])
     except SapiError as e:
@@ -121,14 +131,20 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="funambridge",
         description="Accede a O2 Cloud (Funambol OneMediaHub) por S3 y WebDAV")
-    p.add_argument("--config", default=DEFAULT_CONFIG, help="path to config.yaml")
-    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--config", default=DEFAULT_CONFIG, help="ruta a config.yaml")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="DEBUG también por consola")
+    p.add_argument("--log-file", default=None,
+                   help="escribe un log extendido (DEBUG) a este fichero")
     sub = p.add_subparsers(dest="cmd")
     sv = sub.add_parser("serve", help="run the S3 proxy + admin web UI")
     sv.add_argument("--host", default=None,
                     help="bind address override (e.g. 0.0.0.0 to allow other "
                          "machines on your LAN). Default: config value / 127.0.0.1")
     sv.add_argument("--port", type=int, default=None, help="port override")
+    sv.add_argument("--tls-cert", default=None,
+                    help="cert PEM para servir HTTPS (autofirmado si no existe)")
+    sv.add_argument("--tls-key", default=None, help="clave PEM para HTTPS")
     a = sub.add_parser("add", help="add/renew an account from a base64 blob")
     a.add_argument("blob")
     a.add_argument("--name", default=None)
@@ -146,12 +162,31 @@ def main(argv=None):
     cfg = config.load(args.config)
     cfg.path = args.config
 
+    # Extended on-disk log (DEBUG), rotating. Console stays at its level.
+    log_file = (args.log_file or os.environ.get("FUNAMBRIDGE_LOG_FILE")
+                or cfg.log_file)
+    if log_file:
+        from logging.handlers import RotatingFileHandler
+        fh = RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=3,
+                                 encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        flog = logging.getLogger("funambridge")
+        flog.addHandler(fh)
+        flog.setLevel(logging.DEBUG)
+        log.info("Log extendido (DEBUG) -> %s", log_file)
+
     cmd = args.cmd or "serve"
     if cmd == "serve":
         if getattr(args, "host", None):
             cfg.s3_host = args.host
         if getattr(args, "port", None):
             cfg.s3_port = args.port
+        if getattr(args, "tls_cert", None):
+            cfg.tls_cert = args.tls_cert
+        if getattr(args, "tls_key", None):
+            cfg.tls_key = args.tls_key
         cmd_serve(cfg)
     elif cmd == "add":
         cmd_add(cfg, args.blob, args.name)
