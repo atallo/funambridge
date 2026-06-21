@@ -1,2 +1,2 @@
 """funambridge: accede a O2 Cloud (Funambol OneMediaHub) por S3 y WebDAV."""
-__version__ = "0.0.2"
+__version__ = "0.0.3"

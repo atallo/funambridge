@@ -141,7 +141,45 @@ def _split_endpoint(s3ep):
     return host, port, ("Sí" if scheme == "https" else "No")
 
 
-def render_page(cfg, msg="", err="", endpoint=None):
+def _human(n):
+    n = float(n or 0)
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or u == "TB":
+            return f"{int(n)} {u}" if u == "B" else f"{n:.1f} {u}"
+        n /= 1024
+
+
+def _cache_card(cfg, cache_overview):
+    """Collapsible panel listing the write-cache contents + time to expiry."""
+    name_by_ak = {a.access_key: a.name for a in cfg.accounts}
+    crows, total = "", 0
+    for ak, entries in (cache_overview or {}).items():
+        acc = html.escape(name_by_ak.get(ak, ak))
+        for e in entries:
+            total += 1
+            crows += (f"<tr><td>{acc}</td>"
+                      f"<td class='mono small'>{html.escape(e['path'])}</td>"
+                      f"<td>{_human(e['size'])}</td><td>{html.escape(e['where'])}</td>"
+                      f"<td>{int(e['expires_in'])} s</td></tr>")
+    if not crows:
+        crows = ("<tr><td colspan='5' class='muted' style='text-align:center;"
+                 "padding:18px'>La caché está vacía.</td></tr>")
+    return f"""
+ <div class="card">
+  <details>
+   <summary class="link">Ver caché de escritura ({total})</summary>
+   <table class="mt">
+    <thead><tr><th>Cuenta</th><th>Fichero</th><th>Tamaño</th><th>Dónde</th>
+      <th>Caduca en</th></tr></thead>
+    <tbody>{crows}</tbody>
+   </table>
+   <p class="muted small mt">Instantánea al cargar la página ·
+     <a href="{ADMIN_PREFIX}/">Actualizar</a></p>
+  </details>
+ </div>"""
+
+
+def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
     msg = html.escape(msg or "")
     err = html.escape(err or "")
     s3ep = endpoint or f"http://{cfg.s3_host}:{cfg.s3_port}"
@@ -308,7 +346,6 @@ def render_page(cfg, msg="", err="", endpoint=None):
       + html.escape(cfg.root_bucket) + "</code></div>") if cfg.root_bucket else ""}
    </div>
   </div>
-  <p class="muted small" style="margin:12px 0 0">El panel se deshabilita con <code>admin: {{enabled: false}}</code> en config.yaml.</p>
  </div>
  <script>
   (function(){{
@@ -371,5 +408,6 @@ def render_page(cfg, msg="", err="", endpoint=None):
    </div>
   </details>
  </div>
+ {_cache_card(cfg, cache_overview)}
 </div>
 </body></html>"""

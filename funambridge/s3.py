@@ -67,6 +67,11 @@ class Registry:
         with self._lock:
             self._stores.pop(access_key, None)
 
+    def cache_overview(self):
+        """{access_key: [cache entries]} for accounts with a live Store."""
+        with self._lock:
+            return {ak: st.cache.snapshot() for ak, st in self._stores.items()}
+
 
 def _now_iso():
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -301,7 +306,8 @@ class S3Handler(BaseHTTPRequestHandler):
                   or "http")
         endpoint = f"{scheme}://{host}"
         return self._send_raw(200, render_page(
-            cfg, qs.get("msg", [""])[0], qs.get("err", [""])[0], endpoint=endpoint),
+            cfg, qs.get("msg", [""])[0], qs.get("err", [""])[0], endpoint=endpoint,
+            cache_overview=self.server.registry.cache_overview()),
             "text/html; charset=utf-8")
 
     def _admin_post(self, path):
