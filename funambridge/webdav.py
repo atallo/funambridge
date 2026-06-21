@@ -219,24 +219,54 @@ def _propfind(handler, store, segs, prefix):
     return _multistatus(handler, responses)
 
 
-def _get(handler, store, segs):
-    res = store.download_path(segs)
-    if res is None:
-        return _send(handler, 404, "Not found")
-    data, ctype = res
-    rng = handler.headers.get("Range")
+def send_download(handler, dl, rng=None):
+    """Serve a store.Download (bytes in memory or a file on disk) with HTTP
+    Range support. Disk-backed content is streamed in chunks so large cached
+    files never have to be loaded fully into RAM. Shared by S3 and WebDAV GET."""
+    size = dl.size
+    start, end, is_range = 0, size - 1, False
     if rng and rng.startswith("bytes="):
         try:
             a, _, b = rng[6:].partition("-")
             start = int(a) if a else 0
-            end = int(b) if b else len(data) - 1
-            end = min(end, len(data) - 1)
-            return _send(handler, 206, data[start:end + 1], ctype, {
-                "Content-Range": f"bytes {start}-{end}/{len(data)}",
-                "Accept-Ranges": "bytes"})
+            end = int(b) if b else size - 1
+            end = min(end, size - 1)
+            if 0 <= start <= end:
+                is_range = True
         except ValueError:
             pass
-    _send(handler, 200, data, ctype, {"Accept-Ranges": "bytes"})
+    length = (end - start + 1) if is_range else size
+    handler.send_response(206 if is_range else 200)
+    handler.send_header("Content-Type", dl.ctype)
+    handler.send_header("Content-Length", str(length))
+    handler.send_header("Accept-Ranges", "bytes")
+    if is_range:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+    elif dl.etag:
+        handler.send_header("ETag", f'"{dl.etag}"')
+    handler.end_headers()
+    if handler.command == "HEAD":
+        return
+    if dl.data is not None:
+        handler.wfile.write(dl.data[start:end + 1] if is_range else dl.data)
+        return
+    with open(dl.path, "rb") as fh:
+        if start:
+            fh.seek(start)
+        left = length
+        while left > 0:
+            buf = fh.read(min(1 << 16, left))
+            if not buf:
+                break
+            handler.wfile.write(buf)
+            left -= len(buf)
+
+
+def _get(handler, store, segs):
+    dl = store.download_path(segs)
+    if dl is None:
+        return _send(handler, 404, "Not found")
+    send_download(handler, dl, handler.headers.get("Range"))
 
 
 def _put(handler, store, segs, data):

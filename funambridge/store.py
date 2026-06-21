@@ -10,29 +10,39 @@ the item appear in listings/downloads (async processing). A short per-account
 cache (cache_seconds, 0 = disabled) remembers just-uploaded files so listings,
 HEAD and GET include them until the server catches up. This stops backup tools
 that read a file right after writing it from failing.
+
+Cached content lives in memory up to a budget; anything that does not fit spills
+to a file on disk (one file per entry under disk_dir) and is streamed straight
+from there on download, so large files never have to sit in RAM to be served.
 """
 
 import hashlib
 import logging
 import mimetypes
+import os
 import threading
 import time
 
-from .sapi import FunambolClient, first
+from .sapi import FunambolClient, SapiError, first
 
 log = logging.getLogger("funambridge.store")
 
-# memory budget for cached file *content* (metadata is always kept while fresh)
+# memory budget for cached file *content* (metadata is always kept while fresh);
+# content above the remaining budget is spilled to disk instead.
 _CONTENT_BUDGET = 256 * 1024 * 1024
 
 
 class _WriteCache:
-    """Recently-uploaded files, keyed by full path tuple, kept for `ttl` secs."""
+    """Recently-uploaded files, keyed by full path tuple, kept for `ttl` secs.
 
-    def __init__(self, ttl):
+    Content fits in RAM up to _CONTENT_BUDGET; bigger files spill to a file
+    under `disk_dir` (one .bin per entry) instead of being dropped."""
+
+    def __init__(self, ttl, disk_dir=None):
         self.ttl = int(ttl or 0)
+        self.disk_dir = disk_dir or None
         self._e = {}          # tuple(parts) -> entry
-        self._bytes = 0
+        self._bytes = 0       # RAM held by cached content
         self._lock = threading.RLock()
 
     def enabled(self):
@@ -41,36 +51,54 @@ class _WriteCache:
     def _fresh(self, e):
         return (time.time() - e["ts"]) < self.ttl
 
-    def put(self, parts, size, etag, ctype, data):
+    def _room(self):
+        return _CONTENT_BUDGET - self._bytes
+
+    def _spill(self, key, data):
+        os.makedirs(self.disk_dir, exist_ok=True)
+        h = hashlib.sha256("/".join(key).encode("utf-8", "replace")).hexdigest()[:32]
+        path = os.path.join(self.disk_dir, h + ".bin")
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+        return path
+
+    def put(self, parts, size, etag, ctype, data, media_id=None):
         if self.ttl <= 0:
             return
         with self._lock:
             key = tuple(parts)
             self._drop(key)
-            keep = data if (data is not None and len(data) <= _CONTENT_BUDGET) else None
+            mem, disk, where = None, None, "meta-only"
+            if data is not None:
+                if len(data) <= self._room():           # fits the RAM budget
+                    mem, where = data, "ram"
+                elif self.disk_dir:                      # too big -> spill to disk
+                    try:
+                        disk, where = self._spill(key, data), "disk"
+                    except OSError as ex:                # never fail the upload
+                        log.debug("cache spill failed for %s: %s",
+                                  "/".join(parts), ex)
             self._e[key] = {"ts": time.time(), "name": parts[-1], "size": size,
-                            "etag": etag, "ctype": ctype, "data": keep,
+                            "etag": etag, "ctype": ctype, "data": mem,
+                            "disk": disk, "id": media_id,
                             "mtime": int(time.time() * 1000)}
-            self._bytes += len(keep) if keep else 0
-            self._evict()
-            log.debug("cache put %s (%dB, ttl=%ss)", "/".join(parts), size, self.ttl)
-
-    def _evict(self):
-        # drop oldest content (keep metadata) until under the budget
-        if self._bytes <= _CONTENT_BUDGET:
-            return
-        for k in sorted(self._e, key=lambda k: self._e[k]["ts"]):
-            e = self._e[k]
-            if e["data"] is not None:
-                self._bytes -= len(e["data"])
-                e["data"] = None
-                if self._bytes <= _CONTENT_BUDGET:
-                    break
+            self._bytes += len(mem) if mem else 0
+            log.debug("cache put %s (%dB, ttl=%ss, %s)",
+                      "/".join(parts), size, self.ttl, where)
 
     def _drop(self, key):
         e = self._e.pop(key, None)
-        if e and e["data"] is not None:
+        if not e:
+            return
+        if e.get("data") is not None:
             self._bytes -= len(e["data"])
+        if e.get("disk"):
+            try:
+                os.remove(e["disk"])
+            except OSError:
+                pass
 
     def drop(self, parts):
         with self._lock:
@@ -107,17 +135,41 @@ class _WriteCache:
 
 def _synth(e):
     """Build a media-item-like dict from a cache entry (marked _cached)."""
-    return {"_cached": True, "_data": e["data"], "name": e["name"],
-            "size": e["size"], "etag": e["etag"], "contenttype": e["ctype"],
+    return {"_cached": True, "_data": e.get("data"), "_path": e.get("disk"),
+            "id": e.get("id"), "name": e["name"], "size": e["size"],
+            "etag": e["etag"], "contenttype": e["ctype"],
             "modificationdate": e["mtime"]}
 
 
+class Download:
+    """A file ready to serve: bytes in memory (`data`) or a file on disk
+    (`path`) to stream. Exactly one of the two is set."""
+    __slots__ = ("ctype", "size", "etag", "data", "path")
+
+    def __init__(self, ctype, size, etag="", data=None, path=None):
+        self.ctype = ctype
+        self.size = int(size)
+        self.etag = etag or ""
+        self.data = data
+        self.path = path
+
+
 class Store:
-    def __init__(self, client: FunambolClient, cache_ttl=0, root_bucket=""):
+    def __init__(self, client: FunambolClient, cache_ttl=0, root_bucket="",
+                 disk_dir=None):
         self.c = client
         self._lock = threading.RLock()
         self._folder_cache = {}
-        self.cache = _WriteCache(cache_ttl)
+        self.cache = _WriteCache(cache_ttl, disk_dir=disk_dir)
+        # A fresh Store starts with an empty index, so any spill files left in
+        # disk_dir by a previous run are orphans -- clear them.
+        if disk_dir and os.path.isdir(disk_dir):
+            for f in os.listdir(disk_dir):
+                if f.endswith((".bin", ".tmp")):
+                    try:
+                        os.remove(os.path.join(disk_dir, f))
+                    except OSError:
+                        pass
         # Optional virtual bucket that maps to the O2 root, so the files sitting
         # directly at the root (which ListBuckets can't show) are reachable via
         # S3 inside this bucket. "" disables it.
@@ -258,15 +310,37 @@ class Store:
             return None
         return self._download(m)
 
+    def _overwrite(self, parts, folder_id, fname):
+        """A PUT replaces. Delete any current item with this name first, or O2
+        keeps the old one and stores the new upload as 'name (1).ext'. Covers
+        both a copy still only in the write cache (just uploaded, not yet
+        listable -- deleted by its server id) and one already visible."""
+        e = self.cache.get(parts)
+        if e and e.get("id"):
+            try:
+                self.c.delete_media(e["id"])
+            except SapiError as ex:
+                log.debug("overwrite: cached delete %s: %s", "/".join(parts), ex)
+        self.cache.drop(parts)
+        try:
+            for m in self.c.list_media(folder_id):
+                if str(first(m, "name", "filename")) == fname:
+                    mid = first(m, "id", "mediaid")
+                    if mid:
+                        self.c.delete_media(mid)
+        except SapiError as ex:
+            log.debug("overwrite: server scan %s: %s", fname, ex)
+
     def put_object(self, bucket, key, data, content_type):
         dirs, fname = self._split_key(key)
         if fname is None:
             raise ValueError("empty key")
         parts = self._base_parts(bucket) + dirs + [fname]
         fid = self.resolve_folder(parts[:-1], create=True)
-        self.c.upload(fid, fname, data, content_type)
+        self._overwrite(parts, fid, fname)
+        new_id = self.c.upload(fid, fname, data, content_type)
         etag = hashlib.md5(data).hexdigest()
-        self.cache.put(parts, len(data), etag, content_type, data)
+        self.cache.put(parts, len(data), etag, content_type, data, media_id=new_id)
         return etag
 
     def delete_object(self, bucket, key):
@@ -319,19 +393,27 @@ class Store:
         return _synth(e) if e else None
 
     def _download(self, m):
+        ctype = m.get("contenttype") or "application/octet-stream"
         if m.get("_cached"):
-            data = m.get("_data")
-            ctype = m.get("contenttype") or "application/octet-stream"
-            return None if data is None else (data, ctype)
-        return self.c.download(m)
+            etag = str(m.get("etag") or "")
+            if m.get("_data") is not None:
+                return Download(ctype, len(m["_data"]), etag=etag, data=m["_data"])
+            path = m.get("_path")
+            if path and os.path.exists(path):
+                return Download(ctype, os.path.getsize(path), etag=etag, path=path)
+            return None                  # content not retained (no disk dir / spill failed)
+        data, dctype = self.c.download(m)
+        return Download(dctype or ctype, len(data),
+                        etag=hashlib.md5(data).hexdigest(), data=data)
 
     def put_file(self, parts, data, content_type):
         if not parts:
             raise ValueError("no file name")
         parent = self.resolve_folder(list(parts[:-1]), create=True)
-        self.c.upload(parent, parts[-1], data, content_type)
+        self._overwrite(list(parts), parent, parts[-1])
+        new_id = self.c.upload(parent, parts[-1], data, content_type)
         etag = hashlib.md5(data).hexdigest()
-        self.cache.put(parts, len(data), etag, content_type, data)
+        self.cache.put(parts, len(data), etag, content_type, data, media_id=new_id)
 
     def make_dir(self, parts):
         self.resolve_folder(list(parts), create=True)
@@ -347,8 +429,10 @@ class Store:
             return
         m = self.find_media(parts)
         self.cache.drop(parts)
-        if m is not None and not m.get("_cached"):
-            self.c.delete_media(first(m, "id", "mediaid"))
+        if m is not None:
+            mid = first(m, "id", "mediaid")
+            if mid:                       # cached items now carry the server id too
+                self.c.delete_media(mid)
 
     def download_path(self, parts):
         m = self.find_media(parts)

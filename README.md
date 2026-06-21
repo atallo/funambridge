@@ -104,7 +104,11 @@ MKCOL, OPTIONS, LOCK/UNLOCK (simulados). La raíz lista carpetas **y** ficheros.
   a dar 403, usa «Renovar sesión» con un HAR/cookies frescos. (El token OAuth
   duradero de la app Android exige la red móvil, no se obtiene en escritorio.)
 - **Latencia al subir.** Tras subir, O2 procesa el item de forma asíncrona (unos
-  segundos a ~30 s) antes de que aparezca en los listados/descargas.
+  segundos a ~30 s) antes de que aparezca en los listados/descargas. La caché de
+  escritura (`cache_seconds` por cuenta) tapa esa ventana sirviendo el fichero
+  recién subido: hasta 256 MB en memoria y el resto volcado a disco
+  (`cache_dir`), que se sirve en streaming. Sube `cache_seconds` por encima de la
+  peor latencia de O2 (p. ej. 45) si lees justo después de escribir.
 - Sin subida multiparte S3, sin renombrar/MOVE/COPY (de momento). Los borrados
   son soft-delete.
 
