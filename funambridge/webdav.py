@@ -99,10 +99,26 @@ def _account(handler):
     return acc
 
 
+def _drain(handler, length):
+    """Discard `length` bytes of request body so keep-alive stays in sync."""
+    remaining = length
+    while remaining > 0:
+        b = handler.rfile.read(min(1 << 20, remaining))
+        if not b:
+            break
+        remaining -= len(b)
+
+
 def handle(handler, method):
-    # Drain the request body (PROPFIND/PROPPATCH/LOCK carry XML; PUT the file)
-    # or HTTP/1.1 keep-alive desyncs.
     length = int(handler.headers.get("Content-Length", 0) or 0)
+
+    # PUT streams its (possibly huge) body straight through, so it must NOT be
+    # pre-read into memory like the other (small, XML) bodies.
+    if method == "PUT":
+        return _handle_put(handler, length)
+
+    # Drain the request body (PROPFIND/PROPPATCH/LOCK carry XML) or HTTP/1.1
+    # keep-alive desyncs.
     body = handler.rfile.read(length) if length > 0 else b""
 
     if method == "OPTIONS":
@@ -132,8 +148,6 @@ def handle(handler, method):
             return _propfind(handler, store, segs, prefix)
         if method in ("GET", "HEAD"):
             return _get(handler, store, segs)
-        if method == "PUT":
-            return _put(handler, store, segs, body)
         if method == "DELETE":
             return _delete(handler, store, segs)
         if method == "MKCOL":
@@ -146,6 +160,43 @@ def handle(handler, method):
         handler.server.log("webdav SAPI error: %s" % e)
         return _send(handler, 502, "upstream error: %s" % e)
     return _send(handler, 405, "Method not allowed")
+
+
+def _handle_put(handler, length):
+    """Streaming PUT: auth first, then stream the body to the store (which spools
+    to disk if large) without ever holding the whole file in memory."""
+    acc = _account(handler)
+    if acc is None:
+        _drain(handler, length)
+        return _need_auth(handler)
+    if not acc.webdav_enabled:
+        _drain(handler, length)
+        return _send(handler, 403, "WebDAV is disabled for this account")
+    try:
+        store, _ = handler.server.registry.store_for(acc.access_key)
+    except SessionExpired as e:
+        _drain(handler, length)
+        return _send(handler, 403, str(e))
+    if store is None:
+        _drain(handler, length)
+        return _send(handler, 403, "account has no captured session")
+    segs, _prefix = _parts_and_prefix(handler)
+    if not segs:
+        _drain(handler, length)
+        return _send(handler, 409, "Cannot PUT at the root")
+    ctype = handler.headers.get("Content-Type", "application/octet-stream")
+    try:
+        store.put_stream(segs, length, ctype, handler.rfile)
+    except (ValueError, OSError) as e:        # body read truncated -> unsafe conn
+        handler.close_connection = True
+        handler.server.log("webdav PUT read error: %s" % e)
+        return _send(handler, 400, "upload incomplete")
+    except SessionExpired as e:
+        return _send(handler, 403, str(e))
+    except SapiError as e:
+        handler.server.log("webdav PUT SAPI error: %s" % e)
+        return _send(handler, 502, "upstream error: %s" % e)
+    return _send(handler, 201, "Created")
 
 
 def _options(handler):
@@ -269,12 +320,6 @@ def _get(handler, store, segs):
     send_download(handler, dl, handler.headers.get("Range"))
 
 
-def _put(handler, store, segs, data):
-    if not segs:
-        return _send(handler, 409, "Cannot PUT at the root")
-    store.put_file(segs, data,
-                   handler.headers.get("Content-Type", "application/octet-stream"))
-    _send(handler, 201, "Created")
 
 
 def _delete(handler, store, segs):

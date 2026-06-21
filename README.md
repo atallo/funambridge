@@ -91,7 +91,7 @@ Un endpoint: `http://<host>:9000` (o vía tu proxy HTTPS).
 | Carpeta / bucket     | una carpeta de OneMediaHub (buckets = raíz)      |
 | Fichero              | un media item (`POST /sapi/media?action=get`)    |
 | Descargar            | url pre-firmada del item                         |
-| Subir                | save-metadata + binario (`/sapi/upload/file`)    |
+| Subir                | save-metadata + binario en streaming (`/sapi/upload/file`) |
 | Borrar               | soft-delete (papelera)                           |
 
 S3: ListBuckets, Create/Delete/HeadBucket, ListObjects(V2), Get/Head/Put/Delete
@@ -109,6 +109,10 @@ MKCOL, OPTIONS, LOCK/UNLOCK (simulados). La raíz lista carpetas **y** ficheros.
   recién subido: hasta 256 MB en memoria y el resto volcado a disco
   (`cache_dir`), que se sirve en streaming. Sube `cache_seconds` por encima de la
   peor latencia de O2 (p. ej. 45) si lees justo después de escribir.
+- **Subida y descarga en streaming**: ni subir ni bajar cargan el fichero entero
+  en memoria (un `PUT` se lee a RAM hasta ~16 MB y a partir de ahí se vuelca a
+  disco). Excepción: un `PUT` S3 con cuerpo `aws-chunked` (firma *streaming*) se
+  decodifica en memoria; usa WebDAV o `UNSIGNED-PAYLOAD` para ficheros enormes.
 - Sin subida multiparte S3, sin renombrar/MOVE/COPY (de momento). Los borrados
   son soft-delete.
 
