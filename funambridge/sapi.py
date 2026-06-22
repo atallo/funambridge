@@ -60,7 +60,26 @@ class SapiError(Exception):
 
 
 class SessionExpired(SapiError):
-    pass
+    # When O2 rejects a stale validation key (SEC-1003) it returns the fresh key
+    # in the error body; we carry it so the call can be retried transparently.
+    def __init__(self, *a, new_validationkey=None, **kw):
+        super().__init__(*a, **kw)
+        self.new_validationkey = new_validationkey
+
+
+def _fresh_validationkey(payload):
+    """O2's SEC-1003 ('Invalid mandatory validation key') response carries the
+    correct, rotated validation key in error.data. Return it (else None)."""
+    if not isinstance(payload, dict):
+        return None
+    err = payload.get("error")
+    if not isinstance(err, dict) or not err.get("data"):
+        return None
+    code = str(err.get("code") or "")
+    msg = str(err.get("message") or "").lower()
+    if code == "SEC-1003" or "validation key" in msg:
+        return str(err["data"])
+    return None
 
 
 def first(d, *keys):
@@ -207,9 +226,15 @@ class FunambolClient:
             log.debug("SAPI <- %s %s HTTP %s: %s", method, _redact(url), e.code,
                       body[:300].decode("utf-8", "replace"))
             if e.code in (401, 403):
+                newvk = None
+                try:
+                    newvk = _fresh_validationkey(json.loads(body.decode("utf-8")))
+                except (ValueError, UnicodeDecodeError):
+                    pass
                 raise SessionExpired(
                     f"{method} {path}: unauthorized (HTTP {e.code}); tokens may "
-                    f"be expired -- re-capture the login", status=e.code)
+                    f"be expired -- re-capture the login", status=e.code,
+                    new_validationkey=newvk)
             raise SapiError(f"{method} {path} -> HTTP {e.code}: "
                             f"{body[:160].decode('utf-8','replace')}", status=e.code)
         except urllib.error.URLError as e:
@@ -240,6 +265,10 @@ class FunambolClient:
         if isinstance(payload, dict) and payload.get("error"):
             err = payload["error"]
             code = err.get("code") if isinstance(err, dict) else None
+            newvk = _fresh_validationkey(payload)
+            if newvk:                       # stale validation key returned as 200
+                raise SessionExpired(f"{method} {path}: stale validation key",
+                                     code=code, new_validationkey=newvk)
             raise SapiError(f"{method} {path} -> SAPI error: {err}", code=code)
         return d if d is not None else payload
 
@@ -262,17 +291,49 @@ class FunambolClient:
             self._json("POST", SAPI["login"], data=b"")
             self._booted = True
 
+    def _set_validationkey(self, vk):
+        """Adopt a rotated validation key: update the query-param value AND the
+        validationKey cookie (O2 double-submits both), absorb any rotated
+        PLC/JSESSIONID from the jar, and persist the refreshed web session."""
+        with self._lock:
+            self.validationkey = vk
+            host = urllib.parse.urlparse(self.base).hostname
+            self._set_cookie(host, "validationKey", vk)
+            if self.session is not None:
+                self.session.validationkey = vk
+                for c in self._jar:
+                    if c.name == "PLC" and c.value:
+                        self.session.plc = c.value
+                    elif c.name == "JSESSIONID" and c.value:
+                        self.session.jsessionid = c.value
+        if self.on_token_refresh:
+            try:
+                self.on_token_refresh(self.oauth)   # persists config (cookie too)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _call(self, method, path, **kw):
         self.ensure_session()
-        try:
-            return self._json(method, path, **kw)
-        except SessionExpired:
-            if self.cookie_mode:
-                raise  # cannot self-refresh a captured web session
-            self._booted = False
-            self.validationkey = None
-            self.ensure_session()
-            return self._json(method, path, **kw)
+        renews = 0
+        while True:
+            try:
+                return self._json(method, path, **kw)
+            except SessionExpired as e:
+                # O2 rotated the validation key but the web session is still
+                # alive: adopt the fresh key it handed back (SEC-1003) and retry.
+                # A few rounds guard against the key rotating again under load.
+                if e.new_validationkey and renews < 3:
+                    renews += 1
+                    log.debug("validation key rotated; renewing (%d) and retrying",
+                              renews)
+                    self._set_validationkey(e.new_validationkey)
+                    continue
+                if self.cookie_mode:
+                    raise  # captured web session, no token to self-refresh
+                self._booted = False
+                self.validationkey = None
+                self.ensure_session()
+                return self._json(method, path, **kw)
 
     def system_information(self):
         d = self._json("GET", SAPI["system"])
