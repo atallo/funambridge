@@ -8,6 +8,8 @@ no server of its own. Admin routes live under the ADMIN_PREFIX.
 
 import html
 
+from . import __version__
+
 ADMIN_PREFIX = "/_admin"
 
 # JS snippet pasted into the O2 web console (cloud.o2online.es origin).
@@ -275,6 +277,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
        background:var(--bg);color:var(--fg)}}
  .wrap{{max-width:1040px;margin:0 auto;padding:28px 18px 60px}}
  h1{{font-size:22px;margin:0}} .sub{{color:var(--muted);margin:2px 0 18px}}
+ .ver{{font-size:13px;font-weight:400;color:var(--muted)}}
  .card{{background:var(--card);border:1px solid var(--bd);border-radius:14px;
         padding:18px 20px;margin:16px 0;box-shadow:0 1px 3px rgba(16,24,40,.05)}}
  .card>h2{{font-size:12px;letter-spacing:.06em;text-transform:uppercase;
@@ -322,7 +325,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
  .note{{color:var(--bad);font-size:13px}}
 </style><script>{_COPY_JS}</script></head><body>
 <div class="wrap">
- <h1>funambridge</h1>
+ <h1>funambridge <span class="ver">v{html.escape(__version__)}</span></h1>
  <p class="sub">Acceso a O2 Cloud por <b>S3</b> y <b>WebDAV</b></p>
  {banner}
 
@@ -340,8 +343,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
     <div class="kv"><b>Host</b> <code id="cx-host">{html.escape(host)}</code> <span class="muted small">(solo el host, sin http:// ni puerto)</span></div>
     <div class="kv"><b>Puerto</b> <code id="cx-port">{html.escape(port)}</code></div>
     <div class="kv"><b>TLS / cifrado</b> <span id="cx-tls">{tls}</span></div>
-    <div class="kv"><b>Direccionamiento</b> <code>path-style</code> · firma verificada
-      <span class="muted small">(activa «path-style» en el cliente; con IP, virtual-host no funciona)</span></div>
+    <div class="kv"><b>Direccionamiento</b> <code>path-style</code></div>
     {("<div class='kv'><b>Ficheros de la raíz</b> en el bucket virtual <code>"
       + html.escape(cfg.root_bucket) + "</code></div>") if cfg.root_bucket else ""}
    </div>
