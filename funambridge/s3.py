@@ -65,7 +65,9 @@ class Registry:
 
     def drop(self, access_key):
         with self._lock:
-            self._stores.pop(access_key, None)
+            st = self._stores.pop(access_key, None)
+        if st is not None:
+            st.close()                 # stop its cache sweeper thread
 
     def cache_overview(self):
         """{access_key: [cache entries]} for accounts with a live Store."""
