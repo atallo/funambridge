@@ -86,6 +86,33 @@ class _WriteCache:
         self._e = {}          # tuple(parts) -> entry
         self._bytes = 0       # RAM held by cached content
         self._lock = threading.RLock()
+        # Background sweeper: expired entries (and their on-disk spill files) are
+        # otherwise only reclaimed when something touches that path again, so a
+        # write-once file would leak its .bin until restart. This drops them as
+        # soon as they go stale.
+        self._stop = threading.Event()
+        self._sweeper = None
+        if self.ttl > 0:
+            self._sweeper = threading.Thread(
+                target=self._sweep_loop, name="fb-cache-sweeper", daemon=True)
+            self._sweeper.start()
+
+    def close(self):
+        self._stop.set()
+
+    def _sweep_loop(self):
+        interval = max(1.0, min(self.ttl, 10))
+        while not self._stop.wait(interval):
+            try:
+                self._sweep()
+            except Exception:  # noqa: BLE001  (never let the sweeper die)
+                pass
+
+    def _sweep(self):
+        """Drop every expired entry (and delete its spill file)."""
+        with self._lock:
+            for k in [k for k, e in self._e.items() if not self._fresh(e)]:
+                self._drop(k)
 
     def enabled(self):
         return self.ttl > 0
@@ -202,7 +229,10 @@ class _WriteCache:
         return out
 
     def snapshot(self):
-        """Current entries for the admin view: path, size, where, expiry (s)."""
+        """Current entries for the admin view: path, size, where, expiry (s).
+        Sweeps expired entries first, so the panel reflects what's really on
+        disk."""
+        self._sweep()
         now = time.time()
         out = []
         with self._lock:
@@ -269,6 +299,10 @@ class Store:
         # directly at the root (which ListBuckets can't show) are reachable via
         # S3 inside this bucket. "" disables it.
         self.root_bucket = root_bucket or ""
+
+    def close(self):
+        """Stop the cache sweeper (called when this Store is discarded)."""
+        self.cache.close()
 
     def _base_parts(self, bucket):
         """Path parts (relative to O2 root) for a bucket: [] for the virtual
