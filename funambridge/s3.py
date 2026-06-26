@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .sapi import FunambolClient, SapiError, SessionExpired
 from .store import Store
-from .admin import ADMIN_PREFIX, CONSOLE_SNIPPET, render_page
+from .admin import ADMIN_PREFIX, CONSOLE_SNIPPET, render_page, cache_rows
 from . import webdav
 from . import auth
 _CRED_RE = re.compile(r"Credential=([^/,\s]+)")
@@ -299,6 +299,11 @@ class S3Handler(BaseHTTPRequestHandler):
         if path == ADMIN_PREFIX + "/snippet.js":
             return self._send_raw(200, CONSOLE_SNIPPET,
                                   "text/javascript; charset=utf-8")
+        if path == ADMIN_PREFIX + "/cache.json":
+            import json
+            rows = cache_rows(cfg, self.server.registry.cache_overview())
+            return self._send_raw(200, json.dumps(rows),
+                                  "application/json; charset=utf-8")
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         # honour a fronting HTTPS reverse proxy when showing the endpoint
         host = (self.headers.get("X-Forwarded-Host", "").split(",")[0].strip()

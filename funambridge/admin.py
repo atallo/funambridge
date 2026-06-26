@@ -151,34 +151,73 @@ def _human(n):
         n /= 1024
 
 
-def _cache_card(cfg, cache_overview):
-    """Collapsible panel listing the write-cache contents + time to expiry."""
+def cache_rows(cfg, cache_overview):
+    """Flatten the write-cache overview into display rows (used by the panel and
+    the /cache.json refresh endpoint)."""
     name_by_ak = {a.access_key: a.name for a in cfg.accounts}
-    crows, total = "", 0
+    rows = []
     for ak, entries in (cache_overview or {}).items():
-        acc = html.escape(name_by_ak.get(ak, ak))
+        acc = name_by_ak.get(ak, ak)
         for e in entries:
-            total += 1
-            crows += (f"<tr><td>{acc}</td>"
-                      f"<td class='mono small'>{html.escape(e['path'])}</td>"
-                      f"<td>{_human(e['size'])}</td><td>{html.escape(e['where'])}</td>"
-                      f"<td>{int(e['expires_in'])} s</td></tr>")
-    if not crows:
-        crows = ("<tr><td colspan='5' class='muted' style='text-align:center;"
-                 "padding:18px'>La caché está vacía.</td></tr>")
+            rows.append({"account": acc, "path": e["path"],
+                         "size": _human(e["size"]), "where": e["where"],
+                         "expires": int(e["expires_in"])})
+    rows.sort(key=lambda r: (r["account"], r["path"]))
+    return rows
+
+
+def _cache_tbody(rows):
+    if not rows:
+        return ("<tr><td colspan='5' class='muted' style='text-align:center;"
+                "padding:18px'>La caché está vacía.</td></tr>")
+    return "".join(
+        f"<tr><td>{html.escape(r['account'])}</td>"
+        f"<td class='mono small'>{html.escape(r['path'])}</td>"
+        f"<td>{html.escape(r['size'])}</td><td>{html.escape(r['where'])}</td>"
+        f"<td>{r['expires']} s</td></tr>" for r in rows)
+
+
+def _cache_card(cfg, cache_overview):
+    """Collapsible card listing the write-cache; refreshes in place (no reload,
+    so it doesn't collapse) via /cache.json, with optional auto-refresh."""
+    rows = cache_rows(cfg, cache_overview)
     return f"""
  <div class="card">
-  <details>
-   <summary class="link">Ver caché de escritura ({total})</summary>
+  <details id="fb-cache" ontoggle="if(this.open)fbCacheRefresh()">
+   <summary class="link">Caché de escritura
+     <span class="badge" id="fb-cache-count">{len(rows)}</span></summary>
+   <div class="cachebar">
+    <button type="button" class="ghost" onclick="fbCacheRefresh()">↻ Actualizar</button>
+    <label class="chk"><input type="checkbox" id="fb-cache-auto"> auto (3 s)</label>
+    <span class="muted small">actualizado: <span id="fb-cache-time">—</span></span>
+   </div>
    <table class="mt">
     <thead><tr><th>Cuenta</th><th>Fichero</th><th>Tamaño</th><th>Dónde</th>
-      <th>Caduca en</th></tr></thead>
-    <tbody>{crows}</tbody>
+      <th>Caduca</th></tr></thead>
+    <tbody id="fb-cache-rows">{_cache_tbody(rows)}</tbody>
    </table>
-   <p class="muted small mt">Instantánea al cargar la página ·
-     <a href="{ADMIN_PREFIX}/">Actualizar</a></p>
   </details>
- </div>"""
+ </div>
+ <script>
+  function fbEsc(s){{return String(s).replace(/[&<>"]/g,function(c){{
+    return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c];}});}}
+  function fbCacheRender(d){{
+    var c=document.getElementById('fb-cache-count'); if(c) c.textContent=d.length;
+    var tb=document.getElementById('fb-cache-rows'); if(!tb) return;
+    if(!d.length){{tb.innerHTML="<tr><td colspan='5' class='muted' style='text-align:center;padding:18px'>La caché está vacía.</td></tr>";}}
+    else{{tb.innerHTML=d.map(function(r){{return "<tr><td>"+fbEsc(r.account)+
+      "</td><td class='mono small'>"+fbEsc(r.path)+"</td><td>"+fbEsc(r.size)+
+      "</td><td>"+fbEsc(r.where)+"</td><td>"+r.expires+" s</td></tr>";}}).join("");}}
+    var t=document.getElementById('fb-cache-time');
+    if(t) t.textContent=new Date().toLocaleTimeString();
+  }}
+  function fbCacheRefresh(){{fetch('{ADMIN_PREFIX}/cache.json')
+    .then(function(r){{return r.json();}}).then(fbCacheRender).catch(function(){{}});}}
+  (function(){{var a=document.getElementById('fb-cache-auto'); if(!a) return; var t=null;
+    a.addEventListener('change',function(){{
+      if(a.checked){{fbCacheRefresh(); t=setInterval(fbCacheRefresh,3000);}}
+      else{{clearInterval(t);}}}});}})();
+ </script>"""
 
 
 def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
@@ -214,41 +253,49 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
             <div class="keyrow"><span class="klbl">SK</span>
               <input id="sk{i}" class="mono" readonly value="{sk}">
               <button type="button" class="ghost" onclick="o2copy('sk{i}')">Copiar</button></div>
-            <details class="mt"><summary class="link">cambiar claves</summary>
-              <form method="post" action="{ADMIN_PREFIX}/keys" class="mt">
+            <details class="mt"><summary class="link">Cambiar claves</summary>
+             <div class="pop">
+              <form method="post" action="{ADMIN_PREFIX}/keys">
                 <input type="hidden" name="name" value="{nm}">
                 <input type="hidden" name="mode" value="regen">
                 <button>Regenerar aleatorias</button></form>
-              <form method="post" action="{ADMIN_PREFIX}/keys" class="mt inline">
+              <form method="post" action="{ADMIN_PREFIX}/keys">
+                <span class="lbl">Fijar manualmente</span>
                 <input type="hidden" name="name" value="{nm}">
                 <input type="hidden" name="mode" value="set">
                 <input name="access_key" placeholder="access_key">
                 <input name="secret_key" placeholder="secret_key">
-                <button>Fijar</button></form>
+                <button class="pri">Fijar</button></form>
+             </div>
             </details>
           </td>
           <td>{toggle(nm, "s3", a.s3_enabled)}</td>
           <td>{toggle(nm, "webdav", a.webdav_enabled)}</td>
           <td>
-            <form method="post" action="{ADMIN_PREFIX}/cache" style="display:inline">
+            <form method="post" action="{ADMIN_PREFIX}/cache" style="display:flex;gap:5px;align-items:center">
               <input type="hidden" name="name" value="{nm}">
               <input name="seconds" type="number" min="0" value="{a.cache_seconds}"
-                     style="width:58px" title="caché de escritura en segundos (0 = off)">
-              <button class="ghost">s</button></form>
+                     style="width:62px" title="caché de escritura en segundos (0 = off)">
+              <span class="muted small">s</span>
+              <button class="ghost" title="guardar">✓</button></form>
           </td>
           <td>{auth}</td>
           <td>
             <details><summary class="link">Renovar sesión</summary>
-              <form method="post" action="{ADMIN_PREFIX}/import-har" enctype="multipart/form-data" class="mt">
+             <div class="pop">
+              <form method="post" action="{ADMIN_PREFIX}/import-har" enctype="multipart/form-data">
+                <span class="lbl">Con HAR (recomendado)</span>
                 <input type="hidden" name="name" value="{nm}">
                 <input type="file" name="har" accept=".har,application/json" required>
-                <button>Renovar con HAR</button></form>
-              <form method="post" action="{ADMIN_PREFIX}/set-session" class="mt">
+                <button class="pri">Subir HAR</button></form>
+              <form method="post" action="{ADMIN_PREFIX}/set-session">
+                <span class="lbl">Con cookies</span>
                 <input type="hidden" name="name" value="{nm}">
-                <input name="jsessionid" placeholder="JSESSIONID" required>
-                <input name="validationkey" placeholder="validationKey" required>
-                <input name="plc" placeholder="PLC">
-                <button>Renovar con cookies</button></form>
+                <input class="mono" name="jsessionid" placeholder="JSESSIONID" required>
+                <input class="mono" name="validationkey" placeholder="validationKey" required>
+                <input class="mono" name="plc" placeholder="PLC">
+                <button class="pri">Guardar cookies</button></form>
+             </div>
             </details>
             <form method="post" action="{ADMIN_PREFIX}/remove" onsubmit="return confirm('¿Eliminar la cuenta {nm}?')" class="mt">
               <input type="hidden" name="name" value="{nm}">
@@ -307,8 +354,24 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
  .keyrow input{{flex:1;min-width:90px;font-size:13px}}
  .klbl{{font-size:11px;color:var(--muted);width:20px}}
  .mt{{margin-top:8px}} .inline input{{margin-right:6px}}
- summary.link{{color:var(--pri);cursor:pointer;font-size:13px;list-style:none}}
+ summary.link{{color:var(--pri);cursor:pointer;font-size:13px;list-style:none;
+   display:inline-flex;align-items:center;gap:6px;user-select:none}}
  summary.link::-webkit-details-marker{{display:none}}
+ summary.link::before{{content:"▸";font-size:10px;transition:transform .15s}}
+ details[open]>summary.link::before{{transform:rotate(90deg)}}
+ summary.link:hover{{text-decoration:underline}}
+ /* styled drop-down panel for the in-row forms (renovar sesión / claves) */
+ .pop{{margin-top:8px;padding:12px 13px;background:#f8fafc;border:1px solid var(--bd);
+   border-radius:10px;display:flex;flex-direction:column;gap:12px;min-width:235px}}
+ .pop form{{display:flex;flex-direction:column;gap:6px;margin:0}}
+ .pop input{{width:100%}}
+ .pop .lbl{{font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+   color:var(--muted)}}
+ .badge{{background:#eef1f4;color:#374151;border-radius:999px;padding:1px 9px;
+   font-size:12px;font-weight:600}}
+ .cachebar{{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:12px}}
+ .chk{{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;
+   cursor:pointer}}
  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}
  @media(max-width:680px){{.grid{{grid-template-columns:1fr}}}}
  .kv{{margin:4px 0}} .kv b{{display:inline-block;min-width:90px;color:var(--muted);font-weight:500}}
