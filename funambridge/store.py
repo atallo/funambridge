@@ -380,15 +380,23 @@ class Store:
     def _index_set(self, folder_id, name, mid, size, modified, etag):
         with self._mi_lock:
             idx = self._media_index.get(str(folder_id))
-        if idx is not None:
-            idx[name] = {"id": str(mid), "size": int(size),
-                         "modified": modified, "etag": etag}
+            if idx is not None:
+                idx[name] = {"id": str(mid), "size": int(size),
+                             "modified": modified, "etag": etag}
 
     def _index_pop(self, folder_id, name):
         with self._mi_lock:
             idx = self._media_index.get(str(folder_id))
-        if idx is not None:
-            idx.pop(name, None)
+            if idx is not None:
+                idx.pop(name, None)
+
+    def _index_items(self, folder_id):
+        """A consistent snapshot [(name, entry), ...] of a folder's index, taken
+        under the lock so a concurrent upload/delete can't mutate the dict while
+        a listing iterates it."""
+        idx = self._media_index_for(folder_id)     # ensure loaded (may do I/O)
+        with self._mi_lock:
+            return list(idx.items())
 
     @staticmethod
     def _item_from_index(name, ent):
@@ -444,7 +452,7 @@ class Store:
             return objects, sorted(common)
         base_prefix = "/".join(pdirs) + ("/" if pdirs else "")
         seen = set()
-        for name, ent in self._media_index_for(base_id).items():
+        for name, ent in self._index_items(base_id):
             full = base_prefix + name
             if not full.startswith(prefix):
                 continue
@@ -603,7 +611,7 @@ class Store:
             raise KeyError("/".join(parts))
         names = sorted(self._children_folders(fid).keys())
         files, seen = [], set()
-        for nm, ent in self._media_index_for(fid).items():
+        for nm, ent in self._index_items(fid):
             seen.add(nm)
             e = self.cache.get(list(parts) + [nm])        # freshest size if cached
             if e is not None:

@@ -247,7 +247,7 @@ class FunambolClient:
             # the server may rotate validationKey via Set-Cookie; keep the query
             # param in sync with whatever is now in the jar.
             with self._lock:
-                for c in self._jar:
+                for c in list(self._jar):     # copy: the opener may mutate it
                     if c.name == "validationKey" and c.value:
                         self.validationkey = c.value
         return resp, resp.read()
@@ -301,7 +301,7 @@ class FunambolClient:
             self._set_cookie(host, "validationKey", vk)
             if self.session is not None:
                 self.session.validationkey = vk
-                for c in self._jar:
+                for c in list(self._jar):     # copy: the opener may mutate it
                     if c.name == "PLC" and c.value:
                         self.session.plc = c.value
                     elif c.name == "JSESSIONID" and c.value:
