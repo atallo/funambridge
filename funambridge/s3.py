@@ -530,6 +530,12 @@ class S3Handler(BaseHTTPRequestHandler):
         ce = self.headers.get("Content-Encoding", "") or ""
         sha = str(self.headers.get("x-amz-content-sha256", ""))
         aws_chunked = "aws-chunked" in ce or sha.startswith("STREAMING-")
+        te = (self.headers.get("Transfer-Encoding", "") or "").lower()
+        if "chunked" in te and not aws_chunked:
+            # HTTP chunked body with no length: refuse rather than store empty
+            self.close_connection = True
+            return self._error(411, "MissingContentLength",
+                               "chunked PUT bodies are not supported")
         if aws_chunked:
             # aws-chunked framing is decoded in RAM (correctness over memory)
             etag = store.put_object(bucket, key, self._read_body(), ctype)

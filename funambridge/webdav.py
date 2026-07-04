@@ -165,6 +165,12 @@ def handle(handler, method):
 def _handle_put(handler, length):
     """Streaming PUT: auth first, then stream the body to the store (which spools
     to disk if large) without ever holding the whole file in memory."""
+    if "chunked" in (handler.headers.get("Transfer-Encoding", "") or "").lower():
+        # We stream by Content-Length; a chunked body has no length, so refuse
+        # loudly instead of silently storing an empty file. Close the connection
+        # since the (chunked) body can't be length-drained.
+        handler.close_connection = True
+        return _send(handler, 411, "Length Required: chunked PUT not supported")
     acc = _account(handler)
     if acc is None:
         _drain(handler, length)
