@@ -177,6 +177,90 @@ def _cache_tbody(rows):
         f"<td>{r['expires']} s</td></tr>" for r in rows)
 
 
+def _explorer_card(cfg):
+    """Card to browse an account's files live on the server (fresh calls, no
+    cache), which doubles as a credentials check."""
+    if not cfg.accounts:
+        return ""
+    opts = "".join(f'<option value="{html.escape(a.name)}">{html.escape(a.name)}'
+                   f'</option>' for a in cfg.accounts)
+    return f"""
+ <div class="card" id="fb-ex">
+  <h2>Explorador del servidor</h2>
+  <p class="muted small" style="margin:-6px 0 12px">Lista los ficheros directamente
+   desde O2, sin caché: si carga, las credenciales de la cuenta siguen siendo válidas.</p>
+  <div class="explbar">
+   <select id="fb-ex-acc">{opts}</select>
+   <button type="button" class="pri" onclick="fbExLoad('')">Probar y listar</button>
+   <span id="fb-ex-status"></span>
+  </div>
+  <div id="fb-ex-crumbs" class="crumbs"></div>
+  <table class="mt" id="fb-ex-table" style="display:none">
+   <thead><tr><th>Nombre</th><th>Tamaño</th><th>Modificado</th></tr></thead>
+   <tbody id="fb-ex-rows"></tbody>
+  </table>
+  <p class="muted small" id="fb-ex-note"></p>
+ </div>
+ <script>
+  function fbExEsc(s){{return String(s).replace(/[&<>"']/g,function(c){{
+    return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c];}});}}
+  function fbExHuman(n){{n=Number(n||0);var u=['B','KB','MB','GB','TB'],i=0;
+    while(n>=1024&&i<u.length-1){{n/=1024;i++;}} return (i?n.toFixed(1):n)+' '+u[i];}}
+  function fbExDate(v){{v=Number(v||0); if(!v) return ''; if(v<1e11) v*=1000;
+    return new Date(v).toLocaleString();}}
+  var fbExPath='';
+  function fbExLoad(path){{
+    var acc=document.getElementById('fb-ex-acc').value,
+        st=document.getElementById('fb-ex-status');
+    st.className='muted small'; st.textContent='Consultando al servidor…';
+    fetch('{ADMIN_PREFIX}/browse.json?name='+encodeURIComponent(acc)+
+          '&path='+encodeURIComponent(path))
+      .then(function(r){{return r.json();}}).then(fbExRender)
+      .catch(function(e){{st.className='tag bad exstat';
+        st.textContent='✗ No se pudo contactar con el proxy: '+e;}});
+  }}
+  function fbExRender(d){{
+    var st=document.getElementById('fb-ex-status'), tb=document.getElementById('fb-ex-rows'),
+        tbl=document.getElementById('fb-ex-table'), note=document.getElementById('fb-ex-note'),
+        cr=document.getElementById('fb-ex-crumbs');
+    if(!d.ok){{
+      var hint={{'session':' — la sesión ha caducado: usa «Renovar sesión» con un HAR fresco.',
+                 'noauth':' — añade una sesión a la cuenta.',
+                 'upstream':' — error de O2; reinténtalo en un rato.'}}[d.kind]||'';
+      st.className='tag bad exstat'; st.textContent='✗ '+(d.error||'error')+hint;
+      tbl.style.display='none'; note.textContent=''; return;
+    }}
+    fbExPath=d.path||'';
+    var s='✓ Credenciales válidas · comprobado a las '+d.checked;
+    if(d.storage&&d.storage.quota){{
+      s+=' · usado '+fbExHuman(d.storage.used)+' de '+fbExHuman(d.storage.quota);}}
+    st.className='tag ok exstat'; st.textContent=s;
+    var parts=fbExPath?fbExPath.split('/'):[], h='<a href="#" data-p="">raíz</a>', acc='';
+    for(var i=0;i<parts.length;i++){{acc+=(i?'/':'')+parts[i];
+      h+=' / <a href="#" data-p="'+fbExEsc(acc)+'">'+fbExEsc(parts[i])+'</a>';}}
+    cr.innerHTML=h;
+    var rows='';
+    if(fbExPath){{rows+='<tr class="exdir"><td colspan="3"><a href="#" data-p="'+
+      fbExEsc(parts.slice(0,-1).join('/'))+'">⬑ ..</a></td></tr>';}}
+    d.folders.forEach(function(f){{var p=(fbExPath?fbExPath+'/':'')+f;
+      rows+='<tr class="exdir"><td colspan="3"><a href="#" data-p="'+fbExEsc(p)+'">📁 '+
+        fbExEsc(f)+'</a></td></tr>';}});
+    d.files.forEach(function(f){{rows+='<tr><td class="mono small">'+fbExEsc(f.name)+
+      '</td><td>'+fbExHuman(f.size)+'</td><td class="small">'+fbExEsc(fbExDate(f.modified))+
+      '</td></tr>';}});
+    if(!rows) rows="<tr><td colspan='3' class='muted' style='text-align:center;padding:18px'>Carpeta vacía.</td></tr>";
+    tb.innerHTML=rows; tbl.style.display='';
+    note.textContent=d.folders.length+' carpetas · '+d.total_files+' ficheros'+
+      (d.total_files>d.files.length?' (mostrando los '+d.files.length+' primeros)':'');
+  }}
+  document.getElementById('fb-ex').addEventListener('click',function(ev){{
+    var a=ev.target.closest('a[data-p]'); if(!a) return;
+    ev.preventDefault(); fbExLoad(a.getAttribute('data-p'));}});
+  function fbExOpen(name){{document.getElementById('fb-ex-acc').value=name;
+    document.getElementById('fb-ex').scrollIntoView({{behavior:'smooth'}}); fbExLoad('');}}
+ </script>"""
+
+
 def _cache_card(cfg, cache_overview):
     """Collapsible card listing the write-cache; refreshes in place (no reload,
     so it doesn't collapse) via /cache.json, with optional auto-refresh."""
@@ -281,7 +365,10 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
           </td>
           <td>{auth}</td>
           <td>
-            <details><summary class="link">Renovar sesión</summary>
+            <button type="button" class="ghost" data-acc="{nm}"
+                    onclick="fbExOpen(this.dataset.acc)"
+                    title="probar las credenciales y ver los ficheros en O2">Explorar</button>
+            <details class="mt"><summary class="link">Renovar sesión</summary>
              <div class="pop">
               <form method="post" action="{ADMIN_PREFIX}/import-har" enctype="multipart/form-data">
                 <span class="lbl">Con HAR (recomendado)</span>
@@ -372,6 +459,14 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
  .cachebar{{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:12px}}
  .chk{{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;
    cursor:pointer}}
+ /* explorador del servidor */
+ .explbar{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
+ select{{padding:7px 9px;border:1px solid var(--bd);border-radius:8px;background:#fff}}
+ .exstat{{border-radius:8px;padding:5px 10px;line-height:1.4;display:inline-block}}
+ .crumbs{{margin-top:12px;font-size:13px}}
+ .crumbs a{{color:var(--pri);text-decoration:none}} .crumbs a:hover{{text-decoration:underline}}
+ tr.exdir a{{color:var(--fg);text-decoration:none;font-weight:500}}
+ tr.exdir a:hover{{color:var(--pri)}}
  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}
  @media(max-width:680px){{.grid{{grid-template-columns:1fr}}}}
  .kv{{margin:4px 0}} .kv b{{display:inline-block;min-width:90px;color:var(--muted);font-weight:500}}
@@ -473,6 +568,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
    </div>
   </details>
  </div>
+ {_explorer_card(cfg)}
  {_cache_card(cfg, cache_overview)}
 </div>
 </body></html>"""

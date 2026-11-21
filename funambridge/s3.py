@@ -294,6 +294,51 @@ class S3Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _admin_browse(self, cfg):
+        """GET /_admin/browse.json?name=<cuenta>&path=<a/b>: check the account's
+        credentials against O2 (real profile call) and list that folder fresh
+        from the server. Always answers JSON {ok, ...} so the panel can show why
+        it failed (session expired, missing folder, upstream error)."""
+        import json
+        import time
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        name = qs.get("name", [""])[0]
+        parts = [p for p in qs.get("path", [""])[0].split("/") if p]
+
+        def out(obj):
+            return self._send_raw(200, json.dumps(obj),
+                                  "application/json; charset=utf-8")
+
+        acc = cfg.by_name(name)
+        if acc is None:
+            return out({"ok": False, "kind": "noaccount",
+                        "error": "cuenta no encontrada"})
+        if not acc.has_auth():
+            return out({"ok": False, "kind": "noauth",
+                        "error": "la cuenta no tiene sesión guardada"})
+        try:
+            store, _ = self.server.registry.store_for(acc.access_key)
+            store.c.validate_session()          # real call: credentials alive?
+            res = store.browse(parts)
+            try:
+                sp = store.c.storage_space() or {}
+                res["storage"] = {"used": sp.get("used"), "quota": sp.get("quota")}
+            except SapiError:
+                pass
+            res.update(ok=True, path="/".join(parts),
+                       checked=time.strftime("%H:%M:%S"))
+            return out(res)
+        except SessionExpired as e:
+            return out({"ok": False, "kind": "session", "error": str(e)})
+        except KeyError:
+            return out({"ok": False, "kind": "notfound",
+                        "error": "carpeta no encontrada: /" + "/".join(parts)})
+        except SapiError as e:
+            return out({"ok": False, "kind": "upstream", "error": str(e)})
+        except Exception as e:  # noqa: BLE001  (never answer HTML to the panel)
+            self.server.log("admin browse error: %s" % e)
+            return out({"ok": False, "kind": "error", "error": str(e)})
+
     def _admin_get(self, path):
         cfg = self.server.registry.config
         if path == ADMIN_PREFIX + "/snippet.js":
@@ -304,6 +349,8 @@ class S3Handler(BaseHTTPRequestHandler):
             rows = cache_rows(cfg, self.server.registry.cache_overview())
             return self._send_raw(200, json.dumps(rows),
                                   "application/json; charset=utf-8")
+        if path == ADMIN_PREFIX + "/browse.json":
+            return self._admin_browse(cfg)
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         # honour a fronting HTTPS reverse proxy when showing the endpoint
         host = (self.headers.get("X-Forwarded-Host", "").split(",")[0].strip()

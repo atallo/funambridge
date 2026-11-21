@@ -627,6 +627,29 @@ class Store:
                               "etag": e["etag"], "modified": e["mtime"]})
         return names, files
 
+    def browse(self, parts, limit=500):
+        """Fresh, read-only listing straight from the server, bypassing the
+        per-folder index and the write cache. Used by the admin explorer, so a
+        successful answer really proves the account's credentials still work."""
+        fid = self.resolve_folder(list(parts))
+        if fid is None:
+            raise KeyError("/".join(parts))
+        folders = sorted((str(first(f, "name", "foldername"))
+                          for f in self.c.list_folders(fid)
+                          if first(f, "name", "foldername") is not None),
+                         key=str.lower)
+        files = []
+        for m in self.c.list_media(fid):
+            nm = first(m, "name", "filename")
+            if nm is None:
+                continue
+            files.append({"name": str(nm),
+                          "size": int(first(m, "size", "filesize") or 0),
+                          "modified": first(m, "modificationdate", "creationdate")})
+        files.sort(key=lambda x: x["name"].lower())
+        return {"folders": folders, "files": files[:limit],
+                "total_files": len(files)}
+
     def find_media(self, parts):
         if not parts:
             return None
