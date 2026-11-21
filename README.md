@@ -72,6 +72,13 @@ Cada cuenta recibe `access_key`/`secret_key` automáticas; puedes regenerarlas o
 fijarlas desde el panel. Para refrescar la sesión sin perder las claves, usa
 **«Renovar sesión»** en la fila de la cuenta.
 
+**Importante (desde nov. 2026):** O2 solo acepta **subidas** desde el dispositivo
+al que pertenece la sesión, es decir, con el `x-deviceid` (`web-…`) del navegador
+donde iniciaste sesión. Al importar un **HAR** se captura solo; si pegas las cookies
+a mano, rellena también el campo `x-deviceid` (DevTools → Red → cualquier petición
+`/sapi` → cabeceras). Sin él, la cuenta puede **leer pero no escribir**, y el panel
+lo marca como «solo lectura · renueva con HAR».
+
 ## Conectar
 
 Un endpoint: `http://<host>:9000` (o vía tu proxy HTTPS).
@@ -91,7 +98,7 @@ Un endpoint: `http://<host>:9000` (o vía tu proxy HTTPS).
 | Carpeta / bucket     | una carpeta de OneMediaHub (buckets = raíz)      |
 | Fichero              | un media item (`POST /sapi/media?action=get`)    |
 | Descargar            | url pre-firmada del item                         |
-| Subir                | save-metadata + binario en streaming (`/sapi/upload/file`) |
+| Subir                | multipart en streaming a `upload.<host>/sapi/upload` (con el `x-deviceid` del navegador) |
 | Borrar               | soft-delete (papelera)                           |
 
 S3: ListBuckets, Create/Delete/HeadBucket, ListObjects(V2), Get/Head/Put/Delete

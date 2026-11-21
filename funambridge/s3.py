@@ -391,8 +391,9 @@ class S3Handler(BaseHTTPRequestHandler):
             jid = form.get("jsessionid", [""])[0]
             vk = form.get("validationkey", [""])[0]
             plc = form.get("plc", [""])[0]
+            dev = form.get("deviceid", [""])[0]
             try:
-                acc = cfg.upsert_session(nm, jid, vk, plc)
+                acc = cfg.upsert_session(nm, jid, vk, plc, device_id=dev)
             except ValueError as e:
                 return self._redirect(ADMIN_PREFIX + "/?err=" + urllib.parse.quote(str(e)))
             self.server.registry.drop(acc.access_key)

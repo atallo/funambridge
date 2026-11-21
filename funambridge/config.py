@@ -164,8 +164,9 @@ class Config:
         return acc
 
     def upsert_session(self, name, jsessionid, validationkey="", plc="",
-                       base_url=None):
-        """Create/update an account from a manually-provided web session."""
+                       base_url=None, device_id=""):
+        """Create/update an account from a manually-provided web session.
+        `device_id` is the browser's x-deviceid (needed for uploads)."""
         jsessionid = (jsessionid or "").strip()
         if jsessionid.lower().startswith("jsessionid="):
             jsessionid = jsessionid.split("=", 1)[1]
@@ -177,6 +178,8 @@ class Config:
         acc = self.by_name(name) or self.add_account(name or "o2")
         if base_url:
             acc.base_url = base_url
+        if (device_id or "").strip():
+            acc.device_id = device_id.strip()
         acc.set_session(jsessionid, validationkey, (plc or "").strip())
         self.save()
         return acc
@@ -198,6 +201,9 @@ class Config:
             acc.base_url = parsed["base_url"]
         if msisdn:
             acc.oauth.msisdn = msisdn
+        if parsed.get("device_id"):
+            # O2 only accepts uploads from the device the session belongs to
+            acc.device_id = parsed["device_id"]
         acc.set_session(jid, parsed.get("validationkey", ""), parsed.get("plc", ""))
         self.save()
         return acc

@@ -17,6 +17,11 @@ import urllib.parse
 _COOKIE_RE = re.compile(
     r'"name"\s*:\s*"[Cc]ookie"\s*,\s*"value"\s*:\s*"([^"\\]+)"')
 _HOST_RE = re.compile(r'https://([a-zA-Z0-9.-]*o2online\.es)')
+# The browser's device id. Since ~Nov 2026 O2's upload host only accepts writes
+# whose X-deviceid is the device the web session was created for, so the proxy
+# must reuse it.
+_DEVICE_RE = re.compile(
+    r'"name"\s*:\s*"[Xx]-[Dd]evice[Ii][Dd]"\s*,\s*"value"\s*:\s*"([^"\\]+)"')
 
 
 def _cookie_val(cookie_header, name):
@@ -33,11 +38,17 @@ def parse_har_data(text):
     if isinstance(text, (bytes, bytearray)):
         text = text.decode("utf-8", "replace")
     found = {"jsessionid": "", "validationkey": "", "plc": "",
-             "base_url": "https://cloud.o2online.es", "msisdn": ""}
+             "base_url": "https://cloud.o2online.es", "msisdn": "",
+             "device_id": ""}
 
-    m = _HOST_RE.search(text)
-    if m:
-        found["base_url"] = "https://" + m.group(1)
+    for m in _HOST_RE.finditer(text):           # the web host, not upload.<host>
+        if not m.group(1).startswith("upload."):
+            found["base_url"] = "https://" + m.group(1)
+            break
+
+    devices = _DEVICE_RE.findall(text)
+    if devices:
+        found["device_id"] = devices[-1]         # most recent = current session
 
     cookie_headers = _COOKIE_RE.findall(text)
     authed = [c for c in cookie_headers if "validationKey=" in c]

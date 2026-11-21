@@ -327,6 +327,11 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
         auth = ('<span class="tag ok">sesión</span>' if a.session.is_set()
                 else '<span class="tag ok">tokens</span>' if a.oauth.is_set()
                 else '<span class="tag bad">sin auth</span>')
+        if a.session.is_set() and not a.device_id.startswith("web-"):
+            # O2 only accepts uploads from the web device the session belongs to
+            auth += ('<div class="mt"><span class="tag bad" title="Esta sesión no tiene '
+                     'el x-deviceid del navegador: O2 rechazará las subidas. Renueva '
+                     'la sesión con un HAR.">solo lectura · renueva con HAR</span></div>')
         rows += f"""
         <tr>
           <td><div class="acc">{nm}</div><div class="muted small">{html.escape(a.phone)}</div></td>
@@ -380,7 +385,9 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
                 <input type="hidden" name="name" value="{nm}">
                 <input class="mono" name="jsessionid" placeholder="JSESSIONID" required>
                 <input class="mono" name="validationkey" placeholder="validationKey" required>
-                <input class="mono" name="plc" placeholder="PLC">
+                <input class="mono" name="plc" placeholder="PLC (opcional)">
+                <input class="mono" name="deviceid" placeholder="x-deviceid (web-…, para poder subir)"
+                       title="DevTools → Red → cualquier petición /sapi → cabecera x-deviceid">
                 <button class="pri">Guardar cookies</button></form>
              </div>
             </details>
@@ -550,7 +557,9 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
      <div class="kv"><input name="name" placeholder="nombre"></div>
      <div class="kv"><input class="mono" name="jsessionid" placeholder="JSESSIONID" size="46" required></div>
      <div class="kv"><input class="mono" name="validationkey" placeholder="validationKey" size="46" required></div>
-     <div class="kv"><input class="mono" name="plc" placeholder="PLC (recomendado)" size="46"></div>
+     <div class="kv"><input class="mono" name="plc" placeholder="PLC (opcional)" size="46"></div>
+     <div class="kv"><input class="mono" name="deviceid" placeholder="x-deviceid (web-…, necesario para subir)" size="46"
+       title="DevTools → Red → cualquier petición /sapi → cabecera x-deviceid"></div>
      <button class="pri">Guardar cuenta</button>
     </form>
 

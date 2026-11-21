@@ -95,6 +95,53 @@ def as_list(d, *keys):
     return [] if v is None else (v if isinstance(v, list) else [v])
 
 
+class _MultipartBody:
+    """Read-only stream = head bytes + `size` bytes of `body` + tail bytes, so a
+    multipart upload streams the file without loading it whole into memory.
+    `body` is bytes or a seekable file-like. seek(0) rewinds everything (used
+    when a request is retried after a validation-key renewal)."""
+
+    def __init__(self, head, body, size, tail):
+        import io
+        self._head, self._tail, self._size = head, tail, int(size)
+        self._body = io.BytesIO(body) if isinstance(body, (bytes, bytearray)) else body
+        self.length = len(head) + self._size + len(tail)
+        self.seek(0)
+
+    def seek(self, pos, whence=0):
+        if pos != 0 or whence != 0:
+            raise ValueError("only seek(0) is supported")
+        self._part, self._off, self._left = 0, 0, self._size
+        self._body.seek(0)
+        return 0
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = self.length
+        out = bytearray()
+        while len(out) < n and self._part < 3:
+            want = n - len(out)
+            if self._part == 0:                       # multipart head
+                chunk = self._head[self._off:self._off + want]
+                self._off += len(chunk)
+                if self._off >= len(self._head):
+                    self._part, self._off = 1, 0
+            elif self._part == 1:                     # the file itself
+                chunk = self._body.read(min(want, self._left)) if self._left else b""
+                self._left -= len(chunk)
+                if not chunk or self._left <= 0:
+                    if self._left > 0:
+                        raise IOError("upload body shorter than declared size")
+                    self._part = 2
+            else:                                     # closing boundary
+                chunk = self._tail[self._off:self._off + want]
+                self._off += len(chunk)
+                if self._off >= len(self._tail):
+                    self._part = 3
+            out += chunk
+        return bytes(out)
+
+
 class FunambolClient:
     def __init__(self, base_url, device_id, oauth=None, session=None,
                  on_token_refresh=None,
@@ -185,8 +232,8 @@ class FunambolClient:
                 pass
 
     # -- low level ----------------------------------------------------------
-    def _url(self, path, extra=None):
-        url = self.base + path
+    def _url(self, path, extra=None, base=None):
+        url = (base or self.base) + path
         if self.validationkey:
             sep = "&" if "?" in url else "?"
             url += f"{sep}validationkey={urllib.parse.quote(self.validationkey)}"
@@ -204,8 +251,9 @@ class FunambolClient:
             h.update(extra)
         return h
 
-    def _raw(self, method, path, *, data=None, headers=None, extra_query=None):
-        url = self._url(path, extra_query)
+    def _raw(self, method, path, *, data=None, headers=None, extra_query=None,
+             base=None):
+        url = self._url(path, extra_query, base)
         # data may be bytes or a seekable file-like (streamed upload); rewind so
         # a retry (token refresh) re-sends from the start instead of EOF.
         if data is not None and hasattr(data, "seek"):
@@ -423,27 +471,45 @@ class FunambolClient:
     def storage_space(self):
         return self._call("GET", SAPI["storage"])
 
+    def _upload_base(self):
+        """O2 serves uploads from a dedicated host: upload.<web host>."""
+        p = urllib.parse.urlparse(self.base)
+        return f"{p.scheme}://upload.{p.netloc}"
+
     def upload(self, folder_id, name, size, body, content_type="application/octet-stream"):
-        # Two-step upload (as the official client does):
-        #  1) save-metadata -> returns the new item id;
-        #  2) POST the bytes with X-funambol-id = that id.
-        # `body` is bytes or a seekable file-like of exactly `size` bytes; with a
-        # file-like + explicit Content-Length, http.client streams it in blocks
-        # (the whole file never has to sit in memory).
-        ctype = content_type or "application/octet-stream"
-        meta = {"data": {"name": name, "size": size,
-                         "contenttype": ctype, "folderid": folder_id}}
-        d = self._call("POST", "/sapi/upload/file?action=save-metadata",
-                       data=json.dumps(meta).encode(),
-                       headers={"Content-Type": "application/json"})
+        # Since ~19 Nov 2026 O2 rejects the old two-step upload
+        # (/sapi/upload/file?action=save-metadata + save, now 401 with an empty
+        # body). The web client uploads in ONE multipart request to the upload
+        # host:  POST upload.<host>/sapi/upload?action=save
+        #   part "data": {"data":{"name","size","modificationdate","folderid"}}
+        #   part "file": the bytes (application/octet-stream)
+        # answered with {"success":..., "id":..., "status":"V", "etag":...}.
+        # `body` is bytes or a seekable file-like of exactly `size` bytes; it is
+        # streamed inside the multipart envelope, never loaded whole in memory.
+        # (`content_type` is kept for the call signature; O2 infers the type
+        # from the name, like the web client which always sends octet-stream.)
+        fid = int(folder_id) if str(folder_id).isdigit() else folder_id
+        meta = json.dumps({"data": {"name": name, "size": size,
+                                    "modificationdate": "", "folderid": fid}},
+                          ensure_ascii=False, separators=(",", ":"))
+        boundary = "----funambridge" + uuid.uuid4().hex
+        fname = name.replace("\r", " ").replace("\n", " ").replace('"', "%22")
+        head = (f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="data"\r\n\r\n'
+                f"{meta}\r\n"
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="{fname}"\r\n'
+                f"Content-Type: application/octet-stream\r\n\r\n").encode("utf-8")
+        tail = f"\r\n--{boundary}--\r\n".encode("ascii")
+        stream = _MultipartBody(head, body, size, tail)
+        d = self._call("POST", "/sapi/upload?action=save", data=stream,
+                       base=self._upload_base(),
+                       headers={"Content-Type":
+                                f"multipart/form-data; boundary={boundary}",
+                                "Content-Length": str(stream.length)})
         new_id = first(d, "id", "mediaid")
         if not new_id:
-            raise SapiError("upload: save-metadata returned no id")
-        self._call("POST", "/sapi/upload/file?action=save", data=body,
-                   headers={"Content-Type": ctype,
-                            "Content-Length": str(size),
-                            "X-funambol-file-size": str(size),
-                            "X-funambol-id": str(new_id)})
+            raise SapiError(f"upload: no id in response ({str(d)[:160]})")
         return str(new_id)
 
     def download(self, item):
