@@ -252,7 +252,7 @@ class FunambolClient:
         return h
 
     def _raw(self, method, path, *, data=None, headers=None, extra_query=None,
-             base=None):
+             base=None, timeout=None):
         url = self._url(path, extra_query, base)
         # data may be bytes or a seekable file-like (streamed upload); rewind so
         # a retry (token refresh) re-sends from the start instead of EOF.
@@ -267,7 +267,7 @@ class FunambolClient:
         req = urllib.request.Request(url, data=data, method=method,
                                      headers=self._headers(headers))
         try:
-            resp = self._opener.open(req, timeout=self.timeout)
+            resp = self._opener.open(req, timeout=timeout or self.timeout)
         except urllib.error.HTTPError as e:
             self._absorb_refreshed_token(e)
             body = e.read()
@@ -289,6 +289,9 @@ class FunambolClient:
             log.debug("SAPI xx %s %s connection error: %s", method, _redact(url),
                       e.reason)
             raise SapiError(f"{method} {path} -> connection error: {e.reason}")
+        except OSError as e:              # socket timeout / reset mid-request
+            log.debug("SAPI xx %s %s I/O error: %s", method, _redact(url), e)
+            raise SapiError(f"{method} {path} -> I/O error: {e}")
         log.debug("SAPI <- %s %s HTTP %s", method, _redact(url), resp.status)
         self._absorb_refreshed_token(resp)
         if self.cookie_mode:
@@ -502,8 +505,12 @@ class FunambolClient:
                 f"Content-Type: application/octet-stream\r\n\r\n").encode("utf-8")
         tail = f"\r\n--{boundary}--\r\n".encode("ascii")
         stream = _MultipartBody(head, body, size, tail)
+        # The socket timeout applies to every send/recv; after the last byte O2
+        # may take a while (big files) before answering. Giving up too early is
+        # what made clients retry an upload O2 had in fact stored -> duplicates.
+        tmo = max(self.timeout, 120 + size // (1 << 20))
         d = self._call("POST", "/sapi/upload?action=save", data=stream,
-                       base=self._upload_base(),
+                       base=self._upload_base(), timeout=tmo,
                        headers={"Content-Type":
                                 f"multipart/form-data; boundary={boundary}",
                                 "Content-Length": str(stream.length)})
@@ -511,6 +518,24 @@ class FunambolClient:
         if not new_id:
             raise SapiError(f"upload: no id in response ({str(d)[:160]})")
         return str(new_id)
+
+    def download_url(self, media_id):
+        """The pre-signed download url of a media item, by id."""
+        d = self._call("POST", "/sapi/media?action=get",
+                       data=json.dumps({"data": {"ids": [int(media_id)],
+                                                 "fields": ["url"]}}).encode(),
+                       headers={"Content-Type": "application/json"})
+        got = as_list(d, "media", "items")
+        url = first(got[0], "url") if got else None
+        if not url:
+            raise SapiError(f"no download url for media {media_id}")
+        return self.base + url if url.startswith("/") else url
+
+    def open_download(self, media_id, timeout=600):
+        """Open a streaming download of a media item (caller reads/closes)."""
+        req = urllib.request.Request(self.download_url(media_id),
+                                     headers=self._headers())
+        return self._opener.open(req, timeout=timeout)
 
     def download(self, item):
         url = first(item, "url", "downloadurl", "downloadUrl")

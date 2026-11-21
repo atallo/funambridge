@@ -10,6 +10,7 @@ Subcomandos:
     serve        sirve el proxy S3 + WebDAV + panel web (por defecto)
     import-har   importa una sesión web desde un fichero HAR
     probe        prueba la autenticación de una cuenta
+    dedupe       busca y repara copias duplicadas que dejaron subidas fallidas
 
 La configuración vive en un YAML (por defecto: ./config.yaml).
 """
@@ -112,6 +113,25 @@ def cmd_probe(cfg, name):
         print("storage: (skipped:", e, ")")
 
 
+def cmd_dedupe(cfg, name, path, apply, har_path=None):
+    from . import repair
+    if har_path:
+        from . import har
+        d = har.parse_har(har_path)
+        sess = config.Session(jsessionid=d["jsessionid"],
+                              validationkey=d.get("validationkey", ""),
+                              plc=d.get("plc", ""))
+        client = FunambolClient(d.get("base_url") or config.DEFAULT_BASE_URL,
+                                d.get("device_id") or "", session=sess)
+    else:
+        acc = cfg.by_name(name) if name else (cfg.accounts[0] if cfg.accounts
+                                              else None)
+        if acc is None or not acc.has_auth():
+            sys.exit("no hay cuenta con sesion (o usa --har)")
+        client = _client(acc, cfg)
+    repair.run(client, path, apply=apply, out=lambda m: print(m, flush=True))
+
+
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -140,6 +160,13 @@ def main(argv=None):
     ih.add_argument("--name", default=None)
     pr = sub.add_parser("probe", help="test an account's auth")
     pr.add_argument("account", nargs="?")
+    dd = sub.add_parser("dedupe", help="busca/repara copias duplicadas en O2 "
+                                       "(simulación salvo --apply)")
+    dd.add_argument("path", help="carpeta de O2, p. ej. backup/nas.hbk")
+    dd.add_argument("--account", default=None)
+    dd.add_argument("--har", default=None, help="usar la sesión de este HAR")
+    dd.add_argument("--apply", action="store_true",
+                    help="aplicar los cambios (si no, solo informa)")
     args = p.parse_args(argv)
 
     logging.basicConfig(
@@ -179,6 +206,8 @@ def main(argv=None):
         cmd_import_har(cfg, args.har, args.name)
     elif cmd == "probe":
         cmd_probe(cfg, args.account)
+    elif cmd == "dedupe":
+        cmd_dedupe(cfg, args.account, args.path, args.apply, args.har)
 
 
 if __name__ == "__main__":

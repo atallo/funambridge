@@ -20,11 +20,12 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
 import tempfile
 import threading
 import time
 
-from .sapi import FunambolClient, SapiError, first
+from .sapi import FunambolClient, SapiError, SessionExpired, first
 
 log = logging.getLogger("funambridge.store")
 
@@ -35,6 +36,27 @@ _CONTENT_BUDGET = 256 * 1024 * 1024
 # An incoming upload is read into RAM up to this size; bigger ones spill to a
 # temp file on disk as they stream in, so a large PUT never sits in memory.
 _SPOOL_MAX = 16 * 1024 * 1024
+
+# O2 never overwrites: uploading a name that already exists stores the new item
+# as "stem (N).ext". Used to recognise copies spawned by a failed upload.
+_VARIANT_RE = re.compile(r"^(?P<stem>.*) \((?P<n>\d+)\)(?P<ext>\.[^.]*)?$")
+
+# After an upload fails (timeout, reset, 5xx) O2 may still have stored it and
+# only show it a while later. Sweep for such stray copies after these delays.
+_STRAY_SWEEPS = (45, 150)
+
+
+def canonical_name(name):
+    """'a.bucket (2).3' -> 'a.bucket.3'; names without the suffix unchanged."""
+    m = _VARIANT_RE.match(name)
+    return (m.group("stem") + (m.group("ext") or "")) if m else name
+
+
+def _ms(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
 
 
 def read_upload(reader, length, spill_dir, mem_max=None):
@@ -283,6 +305,10 @@ class Store:
         # visible yet (a fresh listing or the short write-cache would miss it).
         self._media_index = {}            # folder_id(str) -> {name: id}
         self._mi_lock = threading.RLock()
+        # (folder_id, name) -> ms timestamp of an upload that failed after it
+        # may have reached O2 (see _mark_dirty).
+        self._dirty = {}
+        self._closed = threading.Event()
         # Fixed pool of locks to serialize PUTs of the same (folder, name).
         self._put_locks = [threading.Lock() for _ in range(64)]
         self.cache = _WriteCache(cache_ttl, disk_dir=disk_dir)
@@ -302,6 +328,7 @@ class Store:
 
     def close(self):
         """Stop the cache sweeper (called when this Store is discarded)."""
+        self._closed.set()
         self.cache.close()
 
     def _base_parts(self, bucket):
@@ -364,12 +391,22 @@ class Store:
             nm = first(m, "name", "filename")
             mid = first(m, "id", "mediaid")
             if nm is not None and mid is not None:
-                loaded[str(nm)] = {
+                ent = {
                     "id": str(mid),
                     "size": int(first(m, "size", "filesize") or 0),
                     "modified": first(m, "modificationdate", "creationdate"),
                     "etag": str(first(m, "etag", "id") or ""),
                 }
+                prev = loaded.get(str(nm))
+                if prev is not None:
+                    # Same name twice (left by an old failed upload): serve the
+                    # newest, remember the rest so overwrite/delete remove them.
+                    if _ms(ent["modified"]) >= _ms(prev["modified"]):
+                        prev, ent = ent, prev
+                    prev.setdefault("dups", []).append(ent["id"])
+                    prev["dups"].extend(ent.pop("dups", []))
+                    ent = prev
+                loaded[str(nm)] = ent
         with self._mi_lock:
             idx = self._media_index.get(fid)
             if idx is None:
@@ -403,7 +440,7 @@ class Store:
         """A media-item-like dict built from an index entry (for reads)."""
         return {"id": ent["id"], "name": name, "size": ent["size"],
                 "modificationdate": ent.get("modified"),
-                "etag": ent.get("etag", "")}
+                "etag": ent.get("etag", ""), "dups": list(ent.get("dups", []))}
 
     def _put_lock(self, folder_id, name):
         # Same (folder, name) always maps to the same lock, so two concurrent
@@ -516,15 +553,112 @@ class Store:
         except SapiError as ex:
             log.debug("overwrite: index load %s: %s", folder_id, ex)
             idx = None
+        ids = []
         if idx is not None:
-            ent = idx.get(fname)
+            with self._mi_lock:
+                ent = idx.get(fname)
             if ent:
-                try:
-                    self.c.delete_media(ent["id"])
-                except SapiError as ex:
-                    log.debug("overwrite: delete %s: %s", "/".join(parts), ex)
-                self._index_pop(folder_id, fname)
+                ids = [ent["id"]] + list(ent.get("dups", []))
+        if self._is_dirty(folder_id, fname):
+            # a previous upload of this name failed: O2 may hold copies we
+            # never learnt the id of -- look them up fresh.
+            try:
+                for m in self.c.list_media(folder_id):
+                    mid = first(m, "id", "mediaid")
+                    if str(first(m, "name", "filename")) == fname and mid:
+                        if str(mid) not in ids:
+                            ids.append(str(mid))
+            except SapiError as ex:
+                log.debug("overwrite: fresh list %s: %s", folder_id, ex)
+        for mid in ids:
+            try:
+                self.c.delete_media(mid)
+            except SapiError as ex:
+                log.debug("overwrite: delete %s (%s): %s", "/".join(parts), mid, ex)
+        if ids:
+            self._index_pop(folder_id, fname)
         self.cache.drop(parts)
+
+    # -- stray copies left by failed uploads --------------------------------
+    def _is_dirty(self, folder_id, fname):
+        with self._mi_lock:
+            return (str(folder_id), fname) in self._dirty
+
+    def _mark_dirty(self, folder_id, fname):
+        """An upload of fname failed after (maybe) reaching O2. Remember it and
+        schedule sweeps that delete any copy the server surfaces later."""
+        key = (str(folder_id), fname)
+        with self._mi_lock:
+            first_time = key not in self._dirty
+            self._dirty.setdefault(key, int(time.time() * 1000) - 60_000)
+        if not first_time:
+            return
+
+        def run():
+            for delay in _STRAY_SWEEPS:
+                if self._closed.wait(delay):
+                    return
+                try:
+                    self._sweep_strays(folder_id, fname)
+                except Exception as ex:  # noqa: BLE001
+                    log.debug("stray sweep %s/%s: %s", folder_id, fname, ex)
+            with self._mi_lock:
+                self._dirty.pop(key, None)
+        threading.Thread(target=run, daemon=True,
+                         name="funambridge-stray").start()
+
+    def _sweep_strays(self, folder_id, fname):
+        """Delete copies of fname other than the one the index serves: same
+        name with another id, or an O2-renamed 'stem (N).ext' created after the
+        failed upload. Holds the name's PUT lock so an upload in flight (whose
+        id we don't know yet) is never mistaken for a stray."""
+        key = (str(folder_id), fname)
+        with self._put_lock(folder_id, fname):
+            with self._mi_lock:
+                since = self._dirty.get(key)
+                idx = self._media_index.get(str(folder_id))
+                ent = idx.get(fname) if idx is not None else None
+                keep = ent["id"] if ent else None
+            if since is None:
+                return
+            items = self.c.list_media(folder_id)
+            name_of = {str(first(m, "id", "mediaid")): str(first(m, "name", "filename"))
+                       for m in items}
+            if keep and keep in name_of and name_of[keep] != fname:
+                # The retry landed while the stray still existed, so O2 stored
+                # it renamed ('stem (1).ext'). The stray holds the same bytes
+                # (same file, same size): serve that one under the real name.
+                same = [m for m in items
+                        if str(first(m, "name", "filename")) == fname
+                        and int(first(m, "size", "filesize") or 0) == ent["size"]]
+                if same:
+                    best = max(same, key=lambda m: _ms(first(
+                        m, "modificationdate", "creationdate")))
+                    with self._mi_lock:
+                        ent["id"] = str(first(best, "id", "mediaid"))
+                    keep = ent["id"]
+                else:
+                    log.warning("'%s' quedó guardado en O2 como '%s'",
+                                fname, name_of[keep])
+            removed = []
+            for m in items:
+                nm = str(first(m, "name", "filename") or "")
+                mid = str(first(m, "id", "mediaid") or "")
+                if not mid or mid == keep:
+                    continue
+                born = _ms(first(m, "creationdate", "modificationdate"))
+                if nm == fname or (canonical_name(nm) == fname and born >= since):
+                    try:
+                        self.c.delete_media(mid)
+                        removed.append(nm)
+                    except SapiError as ex:
+                        log.debug("stray delete %s (%s): %s", nm, mid, ex)
+            if removed:
+                log.info("borradas %d copias sobrantes de '%s' tras una subida "
+                         "fallida: %s", len(removed), fname, ", ".join(removed))
+            if ent and ent.get("dups"):
+                with self._mi_lock:
+                    ent.pop("dups", None)
 
     def _finish_put(self, parts, total, md5, content_type, data, path):
         """Shared tail of every upload: overwrite any prior copy, push the bytes
@@ -536,17 +670,27 @@ class Store:
         try:
             with self._put_lock(fid, fname):
                 self._overwrite(parts, fid, fname)
+                try:
+                    if data is not None:
+                        new_id = self.c.upload(fid, fname, total, data,
+                                               content_type)
+                    else:
+                        with open(path, "rb") as fh:
+                            new_id = self.c.upload(fid, fname, total, fh,
+                                                   content_type)
+                except SessionExpired:
+                    raise                 # rejected up front: nothing stored
+                except Exception:
+                    # Timeout/reset/5xx: O2 may have stored it anyway. Hunt the
+                    # stray copies down so the client's retry can't duplicate.
+                    self._mark_dirty(fid, fname)
+                    raise
+                self._index_set(fid, fname, new_id, total,
+                                int(time.time() * 1000), md5)
                 if data is not None:
-                    new_id = self.c.upload(fid, fname, total, data, content_type)
-                    self._index_set(fid, fname, new_id, total,
-                                    int(time.time() * 1000), md5)
                     self.cache.put(parts, total, md5, content_type, data,
                                    media_id=new_id)
                 else:
-                    with open(path, "rb") as fh:
-                        new_id = self.c.upload(fid, fname, total, fh, content_type)
-                    self._index_set(fid, fname, new_id, total,
-                                    int(time.time() * 1000), md5)
                     adopted = self.cache.put_path(parts, total, md5, content_type,
                                                   path, media_id=new_id)
             return md5
@@ -705,6 +849,11 @@ class Store:
             mid = first(m, "id", "mediaid")
             if mid:                       # cached items now carry the server id too
                 self.c.delete_media(mid)
+            for dup in m.get("dups", []):     # leftover same-name copies
+                try:
+                    self.c.delete_media(dup)
+                except SapiError as ex:
+                    log.debug("delete dup %s: %s", dup, ex)
             parent = self.resolve_folder(list(parts[:-1]))
             if parent is not None:
                 self._index_pop(parent, parts[-1])

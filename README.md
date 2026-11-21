@@ -129,12 +129,34 @@ MKCOL, OPTIONS, LOCK/UNLOCK (simulados). La raíz lista carpetas **y** ficheros.
   decodifica en memoria; usa WebDAV o `UNSIGNED-PAYLOAD` para ficheros enormes.
 - Sin subida multiparte S3, sin renombrar/MOVE/COPY (de momento). Los borrados
   son soft-delete.
+- **O2 no sobrescribe**: si subes un nombre que ya existe, guarda otra copia
+  como `nombre (1).ext`. El proxy borra la copia anterior antes de subir y, si
+  una subida falla a medias (timeout), busca y borra después la copia que O2
+  pudiera haber guardado igualmente, para que el reintento del cliente no deje
+  duplicados.
+
+## Reparar duplicados
+
+Versiones anteriores a la 0.1.10 podían dejar copias de más tras subidas
+fallidas (el mismo nombre dos veces, o `nombre (N).ext`), y eso hace fallar la
+comprobación de integridad de Hyper Backup. Para revisarlo y arreglarlo:
+
+```bash
+python -m funambridge dedupe backup/MiNAS.hbk --account prueba          # simulación
+python -m funambridge dedupe backup/MiNAS.hbk --account prueba --apply  # repara
+```
+
+Descarga todas las copias de cada grupo y compara su contenido: si son
+idénticas deja una con el nombre original y manda el resto a la papelera; si
+solo está completa una copia `(N)`, la vuelve a subir con el nombre original; si
+hay copias completas distintas no toca nada y lo indica. Tras reparar,
+reinicia el contenedor (el proxy guarda un índice de cada carpeta).
 
 ## Estructura
 
 | Fichero                   | Función                                      |
 |---------------------------|----------------------------------------------|
-| `funambridge/cli.py`      | CLI: `serve` / `import-har` / `probe`        |
+| `funambridge/cli.py`      | CLI: `serve` / `import-har` / `probe` / `dedupe` |
 | `funambridge/config.py`   | config YAML, cuentas, claves, flags          |
 | `funambridge/auth.py`     | verificación de firma S3 (SigV4)             |
 | `funambridge/sapi.py`     | cliente de la API SAPI de Funambol           |
@@ -143,6 +165,7 @@ MKCOL, OPTIONS, LOCK/UNLOCK (simulados). La raíz lista carpetas **y** ficheros.
 | `funambridge/webdav.py`   | front-end WebDAV                              |
 | `funambridge/login.py`    | login con número + SMS (OAuth/PKCE de O2)     |
 | `funambridge/har.py`      | extrae la sesión de un HAR                    |
+| `funambridge/repair.py`   | detecta y repara copias duplicadas            |
 | `funambridge/admin.py`    | panel web de administración                   |
 
 ## Aviso
