@@ -57,27 +57,30 @@ del config). Si los ficheros no existen, se generan autofirmados — marca
 ## Añadir una cuenta
 
 Abre el panel (`http://<host>:9000/_admin/`) → botón **«＋ Añadir cuenta nueva»**.
-Tres formas:
+Formas, de más a menos cómoda:
 
-1. **Subir un HAR completo** (recomendado). En DevTools → Network, activa la
-   exportación de HAR **completo** (con datos sensibles, no «sanitized», que
-   borra las cookies), inicia sesión en `cloud.o2online.es` (teléfono + SMS),
-   guarda todo como HAR y súbelo.
-2. **Pegar las cookies**: `JSESSIONID`, `validationKey` y `PLC` (DevTools →
-   Application/Almacenamiento → Cookies → `cloud.o2online.es`).
-3. **Snippet de consola**: útil desde un navegador en el **móvil** (en escritorio
-   el flujo MobileConnect de la app suele fallar porque exige la red móvil).
+1. **Con tu número (SMS)** (recomendado). Escribe un nombre y tu número de O2 y
+   pulsa «Enviar SMS»; escribe el código que te llega y listo. El proxy inicia
+   sesión en O2 por sí mismo (el mismo flujo OAuth que usa la web), sin HAR ni
+   navegador, y la sesión queda asociada a su propio dispositivo.
+2. **Subir un HAR completo**. En DevTools → Network, activa la exportación de HAR
+   **completo** (con datos sensibles, no «sanitized», que borra las cookies),
+   inicia sesión en [cloud.o2online.es](https://cloud.o2online.es), guarda todo
+   como HAR y súbelo.
+3. **Pegar las cookies** `JSESSIONID` y `validationKey` (DevTools →
+   Application/Almacenamiento → Cookies → `cloud.o2online.es`) **y el
+   `x-deviceid`** (DevTools → Red → cualquier petición `/sapi` → cabeceras).
 
 Cada cuenta recibe `access_key`/`secret_key` automáticas; puedes regenerarlas o
 fijarlas desde el panel. Para refrescar la sesión sin perder las claves, usa
-**«Renovar sesión»** en la fila de la cuenta.
+**«Renovar sesión»** en la fila de la cuenta (mismas tres formas). El panel tiene
+arriba un enlace **«Abrir O2 Cloud»** a la web.
 
 **Importante (desde nov. 2026):** O2 solo acepta **subidas** desde el dispositivo
-al que pertenece la sesión, es decir, con el `x-deviceid` (`web-…`) del navegador
-donde iniciaste sesión. Al importar un **HAR** se captura solo; si pegas las cookies
-a mano, rellena también el campo `x-deviceid` (DevTools → Red → cualquier petición
-`/sapi` → cabeceras). Sin él, la cuenta puede **leer pero no escribir**, y el panel
-lo marca como «solo lectura · renueva con HAR».
+al que pertenece la sesión (`x-deviceid`). Con el login por SMS y con el HAR se
+resuelve solo; con cookies pegadas a mano hay que rellenar el `x-deviceid`. Sin
+él, la cuenta puede **leer pero no escribir**, y el panel lo marca como
+«solo lectura · renueva la sesión».
 
 ## Conectar
 
@@ -131,13 +134,14 @@ MKCOL, OPTIONS, LOCK/UNLOCK (simulados). La raíz lista carpetas **y** ficheros.
 
 | Fichero                   | Función                                      |
 |---------------------------|----------------------------------------------|
-| `funambridge/cli.py`      | CLI: `serve` / `add` / `import-har` / `probe`|
+| `funambridge/cli.py`      | CLI: `serve` / `import-har` / `probe`        |
 | `funambridge/config.py`   | config YAML, cuentas, claves, flags          |
 | `funambridge/auth.py`     | verificación de firma S3 (SigV4)             |
 | `funambridge/sapi.py`     | cliente de la API SAPI de Funambol           |
 | `funambridge/store.py`    | mapeo ruta ⇄ SAPI                            |
 | `funambridge/s3.py`       | front-end HTTP: enruta S3 / WebDAV / panel    |
 | `funambridge/webdav.py`   | front-end WebDAV                              |
+| `funambridge/login.py`    | login con número + SMS (OAuth/PKCE de O2)     |
 | `funambridge/har.py`      | extrae la sesión de un HAR                    |
 | `funambridge/admin.py`    | panel web de administración                   |
 

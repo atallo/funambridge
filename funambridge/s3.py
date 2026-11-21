@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.parse
 import uuid
 import xml.sax.saxutils as _xml
@@ -20,9 +21,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .sapi import FunambolClient, SapiError, SessionExpired
 from .store import Store
-from .admin import ADMIN_PREFIX, CONSOLE_SNIPPET, render_page, cache_rows
+from .admin import ADMIN_PREFIX, render_page, cache_rows
 from . import webdav
 from . import auth
+from . import config as _cfgmod
 _CRED_RE = re.compile(r"Credential=([^/,\s]+)")
 
 
@@ -33,6 +35,7 @@ class Registry:
         self.config = config
         self._lock = threading.RLock()
         self._stores = {}   # access_key -> Store
+        self._pending = {}  # token -> SMS login waiting for its code
 
     def _cache_base(self):
         return (self.config.cache_dir
@@ -73,6 +76,31 @@ class Registry:
         """{access_key: [cache entries]} for accounts with a live Store."""
         with self._lock:
             return {ak: st.cache.snapshot() for ak, st in self._stores.items()}
+
+    # -- SMS logins waiting for their code (in memory, short-lived) ---------
+    PENDING_TTL = 600
+
+    def _purge_pending(self):
+        now = time.time()
+        for tok in [t for t, p in self._pending.items()
+                    if now - p["ts"] > self.PENDING_TTL]:
+            self._pending.pop(tok, None)
+
+    def add_pending(self, info):
+        with self._lock:
+            self._purge_pending()
+            tok = uuid.uuid4().hex
+            self._pending[tok] = dict(info, ts=time.time())
+            return tok
+
+    def get_pending(self, token):
+        with self._lock:
+            self._purge_pending()
+            return self._pending.get(token or "")
+
+    def pop_pending(self, token):
+        with self._lock:
+            return self._pending.pop(token or "", None)
 
 
 def _now_iso():
@@ -341,9 +369,6 @@ class S3Handler(BaseHTTPRequestHandler):
 
     def _admin_get(self, path):
         cfg = self.server.registry.config
-        if path == ADMIN_PREFIX + "/snippet.js":
-            return self._send_raw(200, CONSOLE_SNIPPET,
-                                  "text/javascript; charset=utf-8")
         if path == ADMIN_PREFIX + "/cache.json":
             import json
             rows = cache_rows(cfg, self.server.registry.cache_overview())
@@ -359,9 +384,19 @@ class S3Handler(BaseHTTPRequestHandler):
         scheme = (self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
                   or "http")
         endpoint = f"{scheme}://{host}"
+        err = qs.get("err", [""])[0]
+        pending = None
+        tok = qs.get("login", [""])[0]
+        if tok:
+            p = self.server.registry.get_pending(tok)
+            if p is None:
+                err = err or "Ese inicio de sesión ha caducado: vuelve a pedir el SMS"
+            else:
+                pending = {"token": tok, "name": p["name"], "masked": p["masked"]}
         return self._send_raw(200, render_page(
-            cfg, qs.get("msg", [""])[0], qs.get("err", [""])[0], endpoint=endpoint,
-            cache_overview=self.server.registry.cache_overview()),
+            cfg, qs.get("msg", [""])[0], err, endpoint=endpoint,
+            cache_overview=self.server.registry.cache_overview(),
+            pending=pending),
             "text/html; charset=utf-8")
 
     def _admin_post(self, path):
@@ -386,6 +421,47 @@ class S3Handler(BaseHTTPRequestHandler):
                 + ("" if acc.session.validationkey else " (sin validationkey)")))
 
         form = urllib.parse.parse_qs(body.decode("utf-8"))
+        q = urllib.parse.quote
+        if path == ADMIN_PREFIX + "/login-start":
+            # step 1 of the SMS login: start O2's OAuth flow and send the SMS
+            from .login import O2Login, LoginError
+            nm = (form.get("name", [""])[0] or "").strip() or "o2"
+            acc = cfg.by_name(nm)
+            # keep a stable device per account (each login registers a device)
+            dev = acc.device_id if acc and acc.device_id.startswith("web-") else None
+            lg = O2Login(acc.base_url if acc else _cfgmod.DEFAULT_BASE_URL, dev)
+            try:
+                lg.start(form.get("phone", [""])[0])
+            except LoginError as e:
+                return self._redirect(ADMIN_PREFIX + "/?err=" + q("SMS: " + str(e)))
+            tok = self.server.registry.add_pending(
+                {"login": lg, "name": nm, "masked": "···" + lg.phone[-3:]})
+            return self._redirect(ADMIN_PREFIX + "/?login=" + tok + "&msg=" + q(
+                f"SMS enviado a ···{lg.phone[-3:]}: escribe el código"))
+        if path == ADMIN_PREFIX + "/login-verify":
+            # step 2: check the SMS code and store the new session
+            from .login import LoginError
+            tok = form.get("token", [""])[0]
+            p = self.server.registry.get_pending(tok)
+            if p is None:
+                return self._redirect(ADMIN_PREFIX + "/?err=" + q(
+                    "Ese inicio de sesión ha caducado: vuelve a pedir el SMS"))
+            try:
+                res = p["login"].verify(form.get("code", [""])[0])
+            except LoginError as e:
+                return self._redirect(ADMIN_PREFIX + "/?login=" + tok + "&err=" + q(str(e)))
+            self.server.registry.pop_pending(tok)
+            acc = cfg.upsert_session(p["name"], res["jsessionid"], res["validationkey"],
+                                     "", base_url=res["base_url"],
+                                     device_id=res["device_id"])
+            acc.oauth.msisdn = res["msisdn"]
+            cfg.save()
+            self.server.registry.drop(acc.access_key)   # rebuild with new session
+            return self._redirect(ADMIN_PREFIX + "/?msg=" + q(
+                f"Sesión iniciada para '{acc.name}'"))
+        if path == ADMIN_PREFIX + "/login-cancel":
+            self.server.registry.pop_pending(form.get("token", [""])[0])
+            return self._redirect(ADMIN_PREFIX + "/")
         if path == ADMIN_PREFIX + "/set-session":
             nm = (form.get("name", [""])[0] or "").strip() or "o2"
             jid = form.get("jsessionid", [""])[0]
@@ -399,16 +475,6 @@ class S3Handler(BaseHTTPRequestHandler):
             self.server.registry.drop(acc.access_key)
             return self._redirect(ADMIN_PREFIX + "/?msg=" + urllib.parse.quote(
                 f"Sesión guardada para '{acc.name}'"))
-        if path == ADMIN_PREFIX + "/add":
-            blob = (form.get("blob", [""])[0] or "").strip()
-            name = (form.get("name", [""])[0] or "").strip() or None
-            try:
-                acc = cfg.upsert_from_blob(blob, name=name)
-                return self._redirect(ADMIN_PREFIX + "/?msg=" +
-                                      urllib.parse.quote(f"Cuenta '{acc.name}' guardada"))
-            except ValueError as e:
-                return self._redirect(ADMIN_PREFIX + "/?err=" +
-                                      urllib.parse.quote(str(e)))
         if path == ADMIN_PREFIX + "/remove":
             cfg.remove_account(form.get("name", [""])[0])
             cfg.save()

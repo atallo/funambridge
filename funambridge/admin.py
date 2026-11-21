@@ -2,7 +2,7 @@
 Admin web UI for funambridge.
 
 Rendered by the *same* HTTP server as the S3 API (single port). The S3 handler
-dispatches browser requests here; this module is just the snippet + HTML, with
+dispatches browser requests here; this module is just the HTML, with
 no server of its own. Admin routes live under the ADMIN_PREFIX.
 """
 
@@ -11,120 +11,7 @@ import html
 from . import __version__
 
 ADMIN_PREFIX = "/_admin"
-
-# JS snippet pasted into the O2 web console (cloud.o2online.es origin).
-#
-# Flow (COOP/popup-proof, manual return-URL paste):
-#   1. action=start (platform=android -> redirect lands on the passive
-#      clientoauth.html, which never consumes the code or closes the window);
-#   2. open the authorize URL in a NEW TAB; the user completes the SMS there;
-#   3. the user copies the clientoauth.html URL (code+state stay in it) and
-#      pastes it back into the panel;
-#   4. action=validate -> OAuth tokens -> base64 blob to paste into the proxy.
-CONSOLE_SNIPPET = r"""
-(() => {
-  const VERSION = 'v5';
-  const ORIGIN = location.origin;
-  const log = (...a) => console.log('[funambridge]', ...a);
-  log('snippet', VERSION, 'cargado');
-  if (!/o2online\.es$/.test(location.hostname)) {
-    alert("Abre la consola en https://cloud.o2online.es y pega el snippet ahí.");
-    return;
-  }
-  const old = document.getElementById('o2s3-box'); if (old) old.remove();
-  const box = document.createElement('div');
-  box.id = 'o2s3-box';
-  box.style.cssText = 'position:fixed;z-index:2147483647;right:16px;bottom:16px;width:430px;'
-    + 'background:#111;color:#eee;font:13px/1.45 sans-serif;padding:14px;border-radius:10px;'
-    + 'box-shadow:0 6px 30px rgba(0,0,0,.5)';
-  box.innerHTML =
-      '<b>funambridge <span style="color:#6cf">' + VERSION + '</span></b>'
-    + '<div id="o2s3-msg" style="margin:8px 0;color:#bbb">Pulsa «Conectar cuenta».</div>'
-    + '<button id="o2s3-go" style="padding:8px 12px;border:0;border-radius:6px;cursor:pointer">Conectar cuenta</button>'
-    + '<div id="o2s3-2" style="display:none;margin-top:10px">'
-    +   '<div id="o2s3-link" style="margin-bottom:6px"></div>'
-    +   '<div style="color:#bbb;margin-bottom:4px">Cuando acabes el SMS verás una página con un círculo girando. '
-    +     'Copia su URL (barra de direcciones) y pégala aquí:</div>'
-    +   '<input id="o2s3-url" placeholder=".../clientoauth.html?code=..." '
-    +     'style="width:100%;box-sizing:border-box;padding:6px;background:#000;color:#eee;border:1px solid #333;border-radius:6px">'
-    +   '<button id="o2s3-val" style="margin-top:6px;padding:8px 12px;border:0;border-radius:6px;cursor:pointer">Validar y generar código</button>'
-    + '</div>'
-    + '<div id="o2s3-3" style="display:none;margin-top:10px">'
-    +   '<textarea id="o2s3-out" readonly style="width:100%;box-sizing:border-box;height:88px;'
-    +     'background:#000;color:#6f6;border:1px solid #333;border-radius:6px"></textarea>'
-    +   '<button id="o2s3-copy" style="margin-top:6px;padding:8px 12px;border:0;border-radius:6px;cursor:pointer">Copiar código</button>'
-    + '</div>';
-  document.body.appendChild(box);
-  const $ = (id) => document.getElementById(id);
-  const msg = (t) => { $('o2s3-msg').textContent = t; log(t); };
-  const sapi = async (path, opts) => {
-    const r = await fetch(ORIGIN + path, Object.assign({credentials:'include',
-      headers:{'Accept':'application/json','Content-Type':'application/json'}}, opts));
-    const t = await r.text(); let j; try { j = JSON.parse(t); } catch(e) { j = {_raw:t}; }
-    log('SAPI', path, '->', r.status, j); return j;
-  };
-
-  $('o2s3-go').onclick = async () => {
-    try {
-      let phone = prompt('Tu número O2 con prefijo de país (ej. +34600112233):', '+34');
-      if (!phone) return;
-      phone = phone.replace(/[\s-]/g,'');
-      if (phone.startsWith('00')) phone = '+' + phone.slice(2);
-      if (!phone.startsWith('+')) phone = (phone.length === 9 ? '+34' + phone : '+' + phone);
-      log('msisdn normalizado =', phone);
-      window.o2s3phone = phone;
-      msg('Solicitando login…');
-      const start = await sapi('/sapi/login/mobileconnect?action=start&platform=android&msisdn='
-        + encodeURIComponent(phone), {method:'POST', body:'{}'});
-      const url = start && start.data && start.data.authorizationurl;
-      if (!url) { msg('Error en start: ' + JSON.stringify(start)); return; }
-      log('authorizationurl =', url);
-      const tab = window.open(url, '_blank');
-      const a = document.createElement('a'); a.href = url; a.target = '_blank';
-      a.textContent = 'Abrir login de O2 (si no se abrió solo)'; a.style.color = '#6cf';
-      const link = $('o2s3-link'); link.textContent = ''; link.appendChild(a);
-      $('o2s3-2').style.display = 'block';
-      msg(tab ? 'Se abrió una pestaña. Completa el SMS y vuelve aquí.'
-              : 'Tu navegador bloqueó la pestaña: pulsa el enlace de arriba.');
-    } catch(e) { msg('Error: ' + e); }
-  };
-
-  $('o2s3-val').onclick = async () => {
-    try {
-      const ret = $('o2s3-url').value.trim();
-      if (!ret) { msg('Pega la URL de la página del círculo girando.'); return; }
-      let code, state, errd;
-      try { const u = new URL(ret); const q = u.searchParams,
-        h = new URLSearchParams((u.hash||'').replace(/^#/,''));
-        code = q.get('code') || h.get('code'); state = q.get('state') || h.get('state');
-        errd = q.get('error_description') || q.get('error') || h.get('error_description');
-      } catch(e) {}
-      if (errd) { msg('La URL trae un error de O2: ' + errd + '. Revisa el número (con +prefijo) y reintenta «Conectar cuenta».'); return; }
-      if (!code) { msg('No encuentro «code» en esa URL. Copia la URL completa de la página del spinner.'); return; }
-      msg('Validando y obteniendo tokens…');
-      const val = await sapi('/sapi/credential/mobileconnect?action=validate&platform=android',
-        {method:'POST', body: JSON.stringify({data:{code, state}})});
-      const d = (val && val.data) || val;
-      if (!d || !(d.access_token || d.refresh_token)) { msg('Error en validate: ' + JSON.stringify(val)); return; }
-      const blob = {name: window.o2s3phone, msisdn: d.msisdn || window.o2s3phone,
-        access_token: d.access_token, refresh_token: d.refresh_token,
-        expires_in: d.expires_in, platform: 'androidphone'};
-      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(blob))));
-      $('o2s3-3').style.display = 'block';
-      const out = $('o2s3-out'); out.value = b64; out.focus(); out.select();
-      msg('¡Listo! Pulsa «Copiar código» y pégalo en la página del proxy.');
-    } catch(e) { msg('Error: ' + e); }
-  };
-
-  document.body.addEventListener('click', (ev) => {
-    if (!ev.target || ev.target.id !== 'o2s3-copy') return;
-    const out = $('o2s3-out'); if (!out.value) return; out.select();
-    (navigator.clipboard ? navigator.clipboard.writeText(out.value) : Promise.reject())
-      .then(() => msg('Copiado al portapapeles.'))
-      .catch(() => { document.execCommand('copy'); msg('Copiado.'); });
-  });
-})();
-"""
+O2_WEB = "https://cloud.o2online.es"      # la web de O2 Cloud (enlace en el panel)
 
 # Small helper used by the admin page's "Copiar" buttons (works on http/LAN too,
 # where navigator.clipboard is unavailable: falls back to execCommand).
@@ -304,7 +191,32 @@ def _cache_card(cfg, cache_overview):
  </script>"""
 
 
-def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
+def _pending_card(pending):
+    """Card asking for the SMS code of a login started from the panel."""
+    if not pending:
+        return ""
+    tok = html.escape(pending["token"])
+    return f"""
+ <div class="card pend">
+  <h2>Código del SMS</h2>
+  <p style="margin:0 0 12px">O2 ha enviado un SMS al {html.escape(pending["masked"])} para
+   iniciar sesión en la cuenta <b>{html.escape(pending["name"])}</b>. Escribe el código
+   (caduca en unos minutos).</p>
+  <form method="post" action="{ADMIN_PREFIX}/login-verify" class="explbar">
+   <input type="hidden" name="token" value="{tok}">
+   <input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="código"
+          required autofocus style="width:130px;font-size:18px;letter-spacing:.15em">
+   <button class="pri">Validar e iniciar sesión</button>
+  </form>
+  <form method="post" action="{ADMIN_PREFIX}/login-cancel" class="mt">
+   <input type="hidden" name="token" value="{tok}">
+   <button class="ghost">Cancelar</button>
+  </form>
+ </div>"""
+
+
+def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
+                pending=None):
     msg = html.escape(msg or "")
     err = html.escape(err or "")
     s3ep = endpoint or f"http://{cfg.s3_host}:{cfg.s3_port}"
@@ -328,10 +240,11 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
                 else '<span class="tag ok">tokens</span>' if a.oauth.is_set()
                 else '<span class="tag bad">sin auth</span>')
         if a.session.is_set() and not a.device_id.startswith("web-"):
-            # O2 only accepts uploads from the web device the session belongs to
-            auth += ('<div class="mt"><span class="tag bad" title="Esta sesión no tiene '
-                     'el x-deviceid del navegador: O2 rechazará las subidas. Renueva '
-                     'la sesión con un HAR.">solo lectura · renueva con HAR</span></div>')
+            # O2 only accepts uploads from the device the session belongs to
+            auth += ('<div class="mt"><span class="tag bad" title="Esta sesión no es de '
+                     'este dispositivo: O2 rechazará las subidas. Renueva la sesión '
+                     '(SMS o HAR).">solo lectura · renueva la sesión</span></div>')
+        phone_digits = html.escape(a.phone or "")
         rows += f"""
         <tr>
           <td><div class="acc">{nm}</div><div class="muted small">{html.escape(a.phone)}</div></td>
@@ -370,30 +283,51 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
           </td>
           <td>{auth}</td>
           <td>
+           <div class="acts">
             <button type="button" class="ghost" data-acc="{nm}"
                     onclick="fbExOpen(this.dataset.acc)"
                     title="probar las credenciales y ver los ficheros en O2">Explorar</button>
-            <details class="mt"><summary class="link">Renovar sesión</summary>
-             <div class="pop">
-              <form method="post" action="{ADMIN_PREFIX}/import-har" enctype="multipart/form-data">
-                <span class="lbl">Con HAR (recomendado)</span>
+            <button type="button" class="ghost"
+                    onclick="document.getElementById('rn{i}').showModal()">Renovar sesión</button>
+            <form method="post" action="{ADMIN_PREFIX}/remove" onsubmit="return confirm('¿Eliminar la cuenta {nm}?')">
+              <input type="hidden" name="name" value="{nm}">
+              <button class="danger">Eliminar</button></form>
+           </div>
+           <dialog class="dlg" id="rn{i}">
+            <header><b>Renovar sesión · {nm}</b>
+             <form method="dialog"><button class="ghost" aria-label="cerrar">✕</button></form></header>
+            <div class="dbody">
+             <section class="hl">
+              <h4>Con SMS <span class="tag ok">recomendado</span></h4>
+              <p class="muted small">El proxy inicia sesión en O2 por sí mismo: te llega un
+               SMS y escribes el código en la pantalla siguiente.</p>
+              <form method="post" action="{ADMIN_PREFIX}/login-start" class="drow">
+                <input type="hidden" name="name" value="{nm}">
+                <input name="phone" value="{phone_digits}" placeholder="tu número de O2"
+                       inputmode="tel" autocomplete="tel" required>
+                <button class="pri">Enviar SMS</button></form>
+             </section>
+             <section>
+              <h4>Con un HAR</h4>
+              <p class="muted small">Inicia sesión en <a href="{O2_WEB}" target="_blank"
+               rel="noopener">O2 Cloud ↗</a> con DevTools abierto (pestaña Red) y exporta el HAR completo.</p>
+              <form method="post" action="{ADMIN_PREFIX}/import-har" enctype="multipart/form-data" class="drow">
                 <input type="hidden" name="name" value="{nm}">
                 <input type="file" name="har" accept=".har,application/json" required>
-                <button class="pri">Subir HAR</button></form>
-              <form method="post" action="{ADMIN_PREFIX}/set-session">
-                <span class="lbl">Con cookies</span>
+                <button>Subir HAR</button></form>
+             </section>
+             <details class="adv"><summary class="link">Avanzado: pegar las cookies</summary>
+              <form method="post" action="{ADMIN_PREFIX}/set-session" class="dcol">
                 <input type="hidden" name="name" value="{nm}">
                 <input class="mono" name="jsessionid" placeholder="JSESSIONID" required>
                 <input class="mono" name="validationkey" placeholder="validationKey" required>
-                <input class="mono" name="plc" placeholder="PLC (opcional)">
-                <input class="mono" name="deviceid" placeholder="x-deviceid (web-…, para poder subir)"
+                <input class="mono" name="deviceid" placeholder="x-deviceid (web-…, necesario para subir)"
                        title="DevTools → Red → cualquier petición /sapi → cabecera x-deviceid">
-                <button class="pri">Guardar cookies</button></form>
-             </div>
-            </details>
-            <form method="post" action="{ADMIN_PREFIX}/remove" onsubmit="return confirm('¿Eliminar la cuenta {nm}?')" class="mt">
-              <input type="hidden" name="name" value="{nm}">
-              <button class="danger">Eliminar</button></form>
+                <input class="mono" name="plc" placeholder="PLC (opcional)">
+                <button>Guardar cookies</button></form>
+             </details>
+            </div>
+           </dialog>
           </td>
         </tr>"""
     if not rows:
@@ -406,7 +340,6 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
     if err:
         banner += f'<div class="banner err-b">{err}</div>'
 
-    snippet = html.escape(CONSOLE_SNIPPET.strip())
     return f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>funambridge</title>
@@ -468,6 +401,8 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
    cursor:pointer}}
  /* explorador del servidor */
  .explbar{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
+ /* login por SMS: tarjeta del código */
+ .card.pend{{border:2px solid var(--pri);background:#f5f8ff}}
  select{{padding:7px 9px;border:1px solid var(--bd);border-radius:8px;background:#fff}}
  .exstat{{border-radius:8px;padding:5px 10px;line-height:1.4;display:inline-block}}
  .crumbs{{margin-top:12px;font-size:13px}}
@@ -488,11 +423,37 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
  .addbody ol{{padding-left:20px;color:#374151}} textarea{{width:100%;font-family:ui-monospace,monospace;
    border:1px solid var(--bd);border-radius:8px;padding:8px}}
  .note{{color:var(--bad);font-size:13px}}
+ /* cabecera con enlace a la web de O2 */
+ .top{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}}
+ .o2link{{display:inline-block;padding:8px 14px;border:1px solid var(--bd);border-radius:9px;
+   background:#fff;color:var(--pri);text-decoration:none;font-weight:600;font-size:14px}}
+ .o2link:hover{{background:#f1f5ff}}
+ /* acciones de cada cuenta + ventana "Renovar sesión" */
+ .acts{{display:flex;flex-wrap:wrap;gap:6px;align-items:center}}
+ .acts form{{margin:0}}
+ dialog.dlg{{border:0;border-radius:14px;padding:0;width:min(560px,92vw);color:var(--fg);
+   box-shadow:0 24px 64px rgba(16,24,40,.28)}}
+ dialog.dlg::backdrop{{background:rgba(15,23,42,.45)}}
+ .dlg header{{display:flex;justify-content:space-between;align-items:center;
+   padding:14px 18px;border-bottom:1px solid var(--bd)}}
+ .dlg header form{{margin:0}}
+ .dbody{{padding:16px 18px 18px;display:flex;flex-direction:column;gap:14px}}
+ .dbody section{{border:1px solid var(--bd);border-radius:10px;padding:12px 14px}}
+ .dbody section.hl{{border-color:var(--pri);background:#f5f8ff}}
+ .dbody h4{{margin:0 0 4px;font-size:14px;display:flex;align-items:center;gap:8px}}
+ .dbody p{{margin:0 0 10px}}
+ .drow{{display:flex;gap:8px;flex-wrap:wrap;margin:0}} .drow input{{flex:1;min-width:180px}}
+ .dcol{{display:flex;flex-direction:column;gap:8px;margin:10px 0 0}}
 </style><script>{_COPY_JS}</script></head><body>
 <div class="wrap">
- <h1>funambridge <span class="ver">v{html.escape(__version__)}</span></h1>
- <p class="sub">Acceso a O2 Cloud por <b>S3</b> y <b>WebDAV</b></p>
+ <div class="top">
+  <div><h1>funambridge <span class="ver">v{html.escape(__version__)}</span></h1>
+   <p class="sub">Acceso a O2 Cloud por <b>S3</b> y <b>WebDAV</b></p></div>
+  <a class="o2link" href="{O2_WEB}" target="_blank" rel="noopener"
+     title="{O2_WEB}">Abrir O2 Cloud ↗</a>
+ </div>
  {banner}
+ {_pending_card(pending)}
 
  <div class="card">
   <h2>Conexión &nbsp;·&nbsp; <span id="cx-ep" class="muted" style="text-transform:none;letter-spacing:0">{html.escape(s3ep)}</span></h2>
@@ -539,7 +500,16 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
     <p class="muted">Para <b>actualizar</b> la sesión de una cuenta existente sin perder sus
     claves, usa «Renovar sesión» en su fila.</p>
 
-    <h3>Opción A — Subir un HAR completo (recomendado)</h3>
+    <h3>Opción A — Iniciar sesión con tu número (recomendado)</h3>
+    <p class="muted small">El proxy inicia sesión en O2 por sí mismo: te llega un SMS y
+     escribes el código aquí. Sin HAR ni cookies.</p>
+    <form method="post" action="{ADMIN_PREFIX}/login-start" class="inline">
+     <input name="name" placeholder="nombre de la cuenta" required>
+     <input name="phone" placeholder="tu número de O2" inputmode="tel" autocomplete="tel" required>
+     <button class="pri">Enviar SMS</button>
+    </form>
+
+    <h3>Opción B — Subir un HAR completo</h3>
     <ol>
      <li>F12 → pestaña <b>Network/Red</b>; activa la exportación de HAR <b>completo</b> (con datos sensibles, no «sanitized»).</li>
      <li>Inicia sesión en <a href="https://cloud.o2online.es/login" target="_blank">cloud.o2online.es</a> (teléfono + SMS).</li>
@@ -551,7 +521,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
      <button class="pri">Importar HAR</button>
     </form>
 
-    <h3>Opción B — Pegar las cookies</h3>
+    <h3>Opción C — Pegar las cookies</h3>
     <p class="muted small">DevTools → Application/Almacenamiento → Cookies → cloud.o2online.es</p>
     <form method="post" action="{ADMIN_PREFIX}/set-session">
      <div class="kv"><input name="name" placeholder="nombre"></div>
@@ -561,16 +531,6 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None):
      <div class="kv"><input class="mono" name="deviceid" placeholder="x-deviceid (web-…, necesario para subir)" size="46"
        title="DevTools → Red → cualquier petición /sapi → cabecera x-deviceid"></div>
      <button class="pri">Guardar cuenta</button>
-    </form>
-
-    <h3>Opción C — Snippet de consola (desde el móvil)</h3>
-    <p class="muted small">En escritorio suele fallar (<code>Incorrect phone number</code>); útil desde un navegador en el móvil.</p>
-    <button type="button" onclick="o2copy('o2s3-snippet')">Copiar snippet</button>
-    <textarea id="o2s3-snippet" rows="4" readonly onclick="this.select()" class="mt">{snippet}</textarea>
-    <form method="post" action="{ADMIN_PREFIX}/add" class="mt">
-     <div class="kv"><input name="name" placeholder="nombre (opcional)"></div>
-     <textarea name="blob" rows="3" placeholder="pega aquí el base64 del snippet" required></textarea>
-     <button class="pri mt">Guardar cuenta</button>
     </form>
 
     <p class="note">El HAR y las cookies contienen tu sesión activa: trátalos como una contraseña. Todo se procesa en el proxy.</p>

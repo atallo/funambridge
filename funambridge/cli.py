@@ -8,7 +8,6 @@ SMS). No tiene S3, ni WebDAV, ni cliente Linux. funambridge hace de puente.
 
 Subcomandos:
     serve        sirve el proxy S3 + WebDAV + panel web (por defecto)
-    add          añade/renueva una cuenta desde un base64
     import-har   importa una sesión web desde un fichero HAR
     probe        prueba la autenticación de una cuenta
 
@@ -78,15 +77,6 @@ def cmd_serve(cfg):
         s3.shutdown()
 
 
-def cmd_add(cfg, blob, name):
-    try:
-        acc = cfg.upsert_from_blob(blob, name=name)
-    except ValueError as e:
-        sys.exit(f"could not add account: {e}")
-    print(f"Saved account '{acc.name}'  access_key={acc.access_key}  "
-          f"secret_key={acc.secret_key}")
-
-
 def cmd_import_har(cfg, path, name):
     from . import har
     try:
@@ -145,9 +135,6 @@ def main(argv=None):
     sv.add_argument("--tls-cert", default=None,
                     help="cert PEM para servir HTTPS (autofirmado si no existe)")
     sv.add_argument("--tls-key", default=None, help="clave PEM para HTTPS")
-    a = sub.add_parser("add", help="add/renew an account from a base64 blob")
-    a.add_argument("blob")
-    a.add_argument("--name", default=None)
     ih = sub.add_parser("import-har", help="import a web session from a HAR file")
     ih.add_argument("har")
     ih.add_argument("--name", default=None)
@@ -188,8 +175,6 @@ def main(argv=None):
         if getattr(args, "tls_key", None):
             cfg.tls_key = args.tls_key
         cmd_serve(cfg)
-    elif cmd == "add":
-        cmd_add(cfg, args.blob, args.name)
     elif cmd == "import-har":
         cmd_import_har(cfg, args.har, args.name)
     elif cmd == "probe":

@@ -12,9 +12,7 @@ to SAPI as `Authorization: oauth <base64(...)>`. It auto-refreshes: the server
 returns a new token in each response, which the SAPI client persists back here.
 """
 
-import base64
 import datetime as _dt
-import json
 import os
 import threading
 import time
@@ -141,27 +139,6 @@ class Config:
     def remove_account(self, name):
         self.accounts = [a for a in self.accounts if a.name != name]
 
-    def upsert_from_blob(self, b64, name=None):
-        """Decode the base64 produced by the browser console snippet and create
-        or update the matching account. Returns the Account."""
-        try:
-            raw = base64.b64decode(b64, validate=False)
-            data = json.loads(raw.decode("utf-8"))
-        except Exception as e:  # noqa: BLE001
-            raise ValueError(f"invalid credential blob: {e}")
-        access = data.get("access_token") or data.get("accesstoken")
-        refresh = data.get("refresh_token") or data.get("refreshtoken")
-        msisdn = data.get("msisdn", "")
-        if not (access or refresh):
-            raise ValueError("blob has no access_token/refresh_token")
-        name = name or data.get("name") or (f"o2-{msisdn}" if msisdn else "o2")
-        acc = self.by_name(name) or self.add_account(name)
-        acc.set_tokens(access, refresh,
-                       expires_in=data.get("expires_in") or data.get("expiresin", ""),
-                       msisdn=msisdn,
-                       platform=data.get("platform", "web"))
-        self.save()
-        return acc
 
     def upsert_session(self, name, jsessionid, validationkey="", plc="",
                        base_url=None, device_id=""):
