@@ -7,6 +7,7 @@ no server of its own. Admin routes live under the ADMIN_PREFIX.
 """
 
 import html
+import time
 
 from . import __version__
 
@@ -215,8 +216,24 @@ def _pending_card(pending):
  </div>"""
 
 
+def _alive_tag(st):
+    """Small status line with the keepalive result of one account."""
+    if not st:
+        return ""
+    hm = lambda t: time.strftime("%d/%m %H:%M", time.localtime(t))  # noqa: E731
+    if st.get("fail"):
+        return (f'<div class="mt"><span class="tag bad" title="O2 rechazó la '
+                f'sesión el {hm(st["fail"])}">caducada · renueva la sesión'
+                f'</span></div>')
+    if st.get("ok"):
+        return (f'<div class="muted small mt" title="El proxy hace una petición '
+                f'cada pocos minutos para que O2 no cierre la sesión por '
+                f'inactividad">viva · comprobada {hm(st["ok"])}</div>')
+    return ""
+
+
 def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
-                pending=None):
+                pending=None, alive=None):
     msg = html.escape(msg or "")
     err = html.escape(err or "")
     s3ep = endpoint or f"http://{cfg.s3_host}:{cfg.s3_port}"
@@ -244,6 +261,8 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
             auth += ('<div class="mt"><span class="tag bad" title="Esta sesión no es de '
                      'este dispositivo: O2 rechazará las subidas. Renueva la sesión '
                      '(SMS o HAR).">solo lectura · renueva la sesión</span></div>')
+        if a.has_auth():
+            auth += _alive_tag((alive or {}).get(a.access_key))
         phone_digits = html.escape(a.phone or "")
         rows += f"""
         <tr>

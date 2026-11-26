@@ -121,6 +121,7 @@ class Config:
     tls_cert: str = ""          # si cert+key, sirve HTTPS directamente (autofirmado si no existen)
     tls_key: str = ""
     cache_dir: str = ""         # dónde volcar la caché de escritura de ficheros grandes; "" = temporal del sistema
+    keepalive_minutes: int = 5  # ping a O2 cada N min para que la sesión no caduque por inactividad (0 = off)
     accounts: list = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -195,6 +196,7 @@ class Config:
             "root_bucket": self.root_bucket,
             "tls": {"cert": self.tls_cert, "key": self.tls_key},
             "cache_dir": self.cache_dir,
+            "keepalive_minutes": self.keepalive_minutes,
             "accounts": [{
                 "name": a.name,
                 "base_url": a.base_url,
@@ -237,6 +239,8 @@ def load(path):
     cfg.tls_cert = tls.get("cert", "") or ""
     cfg.tls_key = tls.get("key", "") or ""
     cfg.cache_dir = data.get("cache_dir", "") or ""
+    ka = data.get("keepalive_minutes", cfg.keepalive_minutes)
+    cfg.keepalive_minutes = int(ka if ka is not None else 0)
     for a in data.get("accounts") or []:
         o = a.get("oauth") or {}
         cfg.accounts.append(Account(

@@ -45,6 +45,7 @@ def _auth_kind(acc):
 
 def cmd_serve(cfg):
     registry = Registry(cfg)
+    registry.start_keepalive()
     s3 = Server((cfg.s3_host, cfg.s3_port), registry,
                 log=lambda m: log.info("%s", m))
     scheme = "http"

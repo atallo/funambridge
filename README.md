@@ -113,9 +113,12 @@ MKCOL, OPTIONS, LOCK/UNLOCK (simulados). La raíz lista carpetas **y** ficheros.
 - **Caducidad de la sesión.** O2 rota periódicamente la *validation key* (token
   CSRF); el proxy la **renueva sola** (cuando O2 responde `SEC-1003` con la clave
   nueva, la adopta —query + cookie— y reintenta), así que ya no da 403 solo
-  porque el token haya rotado, mientras la sesión siga viva. La sesión web en sí
-  (JSESSIONID) sí caduca a la larga: cuando empiece a dar 403, usa «Renovar
-  sesión» con un HAR/cookies frescos. (El token OAuth duradero de la app Android
+  porque el token haya rotado, mientras la sesión siga viva.
+- **Inactividad.** Desde nov. 2026 O2 cierra la sesión web tras ~1-2 h **sin
+  peticiones** (antes aguantaba días). Para que no caduque entre copia y copia,
+  el proxy hace una petición ligera por cuenta cada `keepalive_minutes` (5 por
+  defecto), como hace la propia web. El panel muestra «viva · comprobada …» o
+  «caducada · renueva la sesión»; en ese caso usa «Renovar sesión» (SMS). (El token OAuth duradero de la app Android
   exige la red móvil, no se obtiene en escritorio.)
 - **Latencia al subir.** Tras subir, O2 procesa el item de forma asíncrona (unos
   segundos a ~30 s) antes de que aparezca en los listados/descargas. La caché de

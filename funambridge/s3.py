@@ -9,6 +9,7 @@ to talk to O2 Cloud.
 """
 
 import datetime as _dt
+import logging
 import os
 import re
 import tempfile
@@ -25,6 +26,8 @@ from .admin import ADMIN_PREFIX, render_page, cache_rows
 from . import webdav
 from . import auth
 from . import config as _cfgmod
+
+log = logging.getLogger("funambridge.keepalive")
 _CRED_RE = re.compile(r"Credential=([^/,\s]+)")
 
 
@@ -36,6 +39,9 @@ class Registry:
         self._lock = threading.RLock()
         self._stores = {}   # access_key -> Store
         self._pending = {}  # token -> SMS login waiting for its code
+        # access_key -> {"session", "ok", "fail", "err", "since"} (keepalive)
+        self._alive = {}
+        self._stop = threading.Event()
 
     def _cache_base(self):
         return (self.config.cache_dir
@@ -71,6 +77,80 @@ class Registry:
             st = self._stores.pop(access_key, None)
         if st is not None:
             st.close()                 # stop its cache sweeper thread
+
+    # -- keepalive --------------------------------------------------------
+    # Since Nov 2026 O2 ends a web session after ~1-2 h WITHOUT requests (it
+    # used to survive a whole day idle). The web app polls every minute; we
+    # make one cheap authenticated call every few minutes so a session that is
+    # only used by a nightly backup does not die in between.
+    def start_keepalive(self):
+        mins = int(getattr(self.config, "keepalive_minutes", 0) or 0)
+        if mins <= 0:
+            log.info("keepalive desactivado (keepalive_minutes: 0)")
+            return
+        threading.Thread(target=self._keepalive_loop, args=(mins * 60,),
+                         daemon=True, name="funambridge-keepalive").start()
+        log.info("keepalive: ping a O2 cada %d min por cuenta", mins)
+
+    def stop_keepalive(self):
+        self._stop.set()
+
+    def _keepalive_loop(self, every):
+        while not self._stop.wait(every):
+            for acc in list(self.config.accounts):
+                try:
+                    self.ping(acc)
+                except Exception as ex:  # noqa: BLE001
+                    log.debug("keepalive %s: %s", acc.name, ex)
+
+    def ping(self, acc):
+        """One authenticated call to keep `acc`'s session alive. Stops pinging
+        a session O2 has already rejected (until it is renewed)."""
+        if not acc.has_auth():
+            return None
+        sid = acc.session.jsessionid or acc.oauth.accesstoken
+        with self._lock:
+            st_ = self._alive.get(acc.access_key)
+            if st_ is None or st_["session"] != sid:
+                st_ = {"session": sid, "ok": 0, "fail": 0, "err": "",
+                       "since": time.time()}
+                self._alive[acc.access_key] = st_
+            if st_["fail"]:
+                return False             # already dead: wait for a renewal
+        try:
+            store, _ = self.store_for(acc.access_key)
+            store.c.validate_session()
+        except SessionExpired as ex:
+            with self._lock:
+                st_["fail"], st_["err"] = time.time(), str(ex)
+            log.warning("la sesión de O2 de '%s' ha caducado (viva %.1f h, "
+                        "último ping bueno %s); renuévala desde el panel",
+                        acc.name, (time.time() - st_["since"]) / 3600,
+                        time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(st_["ok"])) if st_["ok"]
+                        else "ninguno")
+            return False
+        except SapiError as ex:              # network hiccup: try next round
+            with self._lock:
+                st_["err"] = str(ex)
+            log.debug("keepalive %s: %s", acc.name, ex)
+            return None
+        with self._lock:
+            st_["ok"], st_["err"] = time.time(), ""
+        log.debug("keepalive %s: sesión viva", acc.name)
+        return True
+
+    def alive_overview(self):
+        """{access_key: {"ok": ts|0, "fail": ts|0, "since": ts}} for the
+        sessions currently configured (stale entries are ignored)."""
+        out = {}
+        with self._lock:
+            for acc in self.config.accounts:
+                st_ = self._alive.get(acc.access_key)
+                sid = acc.session.jsessionid or acc.oauth.accesstoken
+                if st_ and st_["session"] == sid:
+                    out[acc.access_key] = dict(st_)
+        return out
 
     def cache_overview(self):
         """{access_key: [cache entries]} for accounts with a live Store."""
@@ -396,7 +476,7 @@ class S3Handler(BaseHTTPRequestHandler):
         return self._send_raw(200, render_page(
             cfg, qs.get("msg", [""])[0], err, endpoint=endpoint,
             cache_overview=self.server.registry.cache_overview(),
-            pending=pending),
+            pending=pending, alive=self.server.registry.alive_overview()),
             "text/html; charset=utf-8")
 
     def _admin_post(self, path):

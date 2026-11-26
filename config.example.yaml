@@ -31,6 +31,11 @@ tls:
 # "" = directorio temporal del sistema. En Docker conviene un subdir del volumen.
 cache_dir: ""   # p.ej. /data/cache
 
+# O2 cierra la sesión web tras ~1-2 h sin peticiones (desde nov. 2026). El
+# proxy hace una petición ligera por cuenta cada N minutos para mantenerla
+# viva entre copia y copia. 0 = desactivado.
+keepalive_minutes: 5
+
 accounts:
   - name: personal
     base_url: https://cloud.o2online.es
