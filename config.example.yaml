@@ -2,23 +2,14 @@
 # El fichero real es config.yaml (excluido de git). Normalmente se gestiona
 # desde el panel web, no a mano. En Docker, móntalo en /data/config.yaml.
 
-s3:
-  host: 0.0.0.0       # un único puerto: S3 + WebDAV + panel web.
+server:
+  host: 0.0.0.0       # un único puerto: WebDAV + panel web.
   port: 9000          # 0.0.0.0 = accesible desde tu LAN / red Docker.
 
 admin:
   enabled: true       # pon false para deshabilitar el panel /_admin.
 
-# Verifica la firma AWS SigV4 en las peticiones S3 (el secret_key debe ser
-# correcto). Detrás de un proxy HTTPS, debe reenviar X-Forwarded-Host para que
-# el Host firmado coincida; si tu proxy no puede, pon esto en false.
-verify_s3_signature: true
-
-# Bucket S3 virtual que expone los ficheros sueltos en la raíz de O2 (que
-# ListBuckets no puede mostrar). "" lo desactiva. (En WebDAV la raíz ya los lista.)
-root_bucket: raiz
-
-# TLS integrado opcional, para clientes S3/WebDAV que exigen HTTPS sin un proxy
+# TLS integrado opcional, para clientes WebDAV que exigen HTTPS sin un proxy
 # TLS delante. Si das cert+key y no existen, se generan autofirmados (en el
 # cliente, marca "aceptar certificado no fiable"). Déjalo vacío si terminas TLS
 # en tu propio proxy HTTPS.
@@ -39,13 +30,11 @@ keepalive_minutes: 5
 accounts:
   - name: personal
     base_url: https://cloud.o2online.es
-    access_key: FBXXXXXXXXXXXXXXXXXX      # regenerar/fijar desde el panel
-    secret_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    access_key: O2XXXXXXXXXXXXXXXXXX      # usuario WebDAV (regenerar/fijar desde el panel)
+    secret_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   # contraseña WebDAV
     device_id: funambridge-xxxxxxxxxxxx
-    s3_enabled: true                       # exponer esta cuenta por S3
-    webdav_enabled: true                   # exponer esta cuenta por WebDAV
     cache_seconds: 15                      # caché tras subir (segundos; 0 = off)
-    # Se rellena al añadir la cuenta (subir HAR / pegar cookies).
+    # Se rellena al iniciar sesión (SMS desde el panel, HAR o cookies).
     oauth: {accesstoken: "", refreshtoken: "", platform: web, expiresin: "",
             lastrefreshdate: 0, msisdn: "", captured_at: ""}
     session: {jsessionid: "", validationkey: "", plc: "", captured_at: ""}

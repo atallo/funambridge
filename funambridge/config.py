@@ -1,15 +1,11 @@
 """
-Configuration model for funambridge (token edition).
+Configuration model for funambridge.
 
-Stored as YAML. Holds global S3/admin settings plus one or more O2 Cloud
+Stored as YAML. Holds the server/admin settings plus one or more O2 Cloud
 accounts. Each account has:
-  * its own auto-generated S3 access_key/secret_key (UUID-based), so an S3
-    client selects the account by which key pair it signs with;
-  * an OAuth credential captured from a browser login (see the admin page).
-
-The OAuth credential mirrors what the official Android client stores and sends
-to SAPI as `Authorization: oauth <base64(...)>`. It auto-refreshes: the server
-returns a new token in each response, which the SAPI client persists back here.
+  * its own WebDAV user/password (stored as access_key/secret_key, the names
+    used since the S3 days), so a WebDAV client picks the account by its user;
+  * the O2 web session from the SMS login (or a HAR / pasted cookies).
 """
 
 import datetime as _dt
@@ -72,8 +68,6 @@ class Account:
     access_key: str = field(default_factory=new_key)
     secret_key: str = field(default_factory=new_secret)
     device_id: str = field(default_factory=lambda: "funambridge-" + uuid.uuid4().hex[:12])
-    s3_enabled: bool = True
-    webdav_enabled: bool = True
     cache_seconds: int = 15     # caché de escritura tras subir (0 = desactivada)
     oauth: OAuth = field(default_factory=OAuth)
     session: Session = field(default_factory=Session)
@@ -112,12 +106,10 @@ class Account:
 @dataclass
 class Config:
     path: str
-    s3_host: str = "0.0.0.0"   # reachable from the LAN by default (see warning on serve)
-    s3_port: int = 9000
+    host: str = "0.0.0.0"      # reachable from the LAN by default (see warning on serve)
+    port: int = 9000
     admin_enabled: bool = True
-    verify_s3_signature: bool = True
     log_file: str = ""          # si se indica, escribe un log extendido (DEBUG) ahí
-    root_bucket: str = "raiz"   # bucket S3 virtual = raíz de O2 (ficheros sueltos); "" = off
     tls_cert: str = ""          # si cert+key, sirve HTTPS directamente (autofirmado si no existen)
     tls_key: str = ""
     cache_dir: str = ""         # dónde volcar la caché de escritura de ficheros grandes; "" = temporal del sistema
@@ -189,11 +181,9 @@ class Config:
     # -- persistence --------------------------------------------------------
     def to_dict(self):
         return {
-            "s3": {"host": self.s3_host, "port": self.s3_port},
+            "server": {"host": self.host, "port": self.port},
             "admin": {"enabled": self.admin_enabled},
-            "verify_s3_signature": self.verify_s3_signature,
             "log_file": self.log_file,
-            "root_bucket": self.root_bucket,
             "tls": {"cert": self.tls_cert, "key": self.tls_key},
             "cache_dir": self.cache_dir,
             "keepalive_minutes": self.keepalive_minutes,
@@ -203,8 +193,6 @@ class Config:
                 "access_key": a.access_key,
                 "secret_key": a.secret_key,
                 "device_id": a.device_id,
-                "s3_enabled": a.s3_enabled,
-                "webdav_enabled": a.webdav_enabled,
                 "cache_seconds": a.cache_seconds,
                 "oauth": asdict(a.oauth),
                 "session": asdict(a.session),
@@ -226,15 +214,12 @@ def load(path):
         return cfg
     with open(path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
-    s3 = data.get("s3") or {}
-    cfg.s3_host = s3.get("host", cfg.s3_host)
-    cfg.s3_port = int(s3.get("port", cfg.s3_port))
+    # "server" since 0.2.0; configs from the S3 days call it "s3"
+    srv = data.get("server") or data.get("s3") or {}
+    cfg.host = srv.get("host", cfg.host)
+    cfg.port = int(srv.get("port", cfg.port))
     cfg.admin_enabled = bool((data.get("admin") or {}).get("enabled", True))
-    cfg.verify_s3_signature = bool(data.get("verify_s3_signature", True))
     cfg.log_file = data.get("log_file", "") or ""
-    cfg.root_bucket = data.get("root_bucket", "raiz")
-    if cfg.root_bucket is None:
-        cfg.root_bucket = ""
     tls = data.get("tls") or {}
     cfg.tls_cert = tls.get("cert", "") or ""
     cfg.tls_key = tls.get("key", "") or ""
@@ -249,8 +234,6 @@ def load(path):
             access_key=a.get("access_key") or new_key(),
             secret_key=a.get("secret_key") or new_secret(),
             device_id=a.get("device_id") or ("funambridge-" + uuid.uuid4().hex[:12]),
-            s3_enabled=bool(a.get("s3_enabled", True)),
-            webdav_enabled=bool(a.get("webdav_enabled", True)),
             cache_seconds=int(a.get("cache_seconds", 15) or 0),
             oauth=OAuth(
                 accesstoken=o.get("accesstoken", ""),

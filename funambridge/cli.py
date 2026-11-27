@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-funambridge -- accede a O2 Cloud (Funambol OneMediaHub) por S3 y WebDAV.
+funambridge -- accede a O2 Cloud (Funambol OneMediaHub) por WebDAV.
 
 O2 Cloud (Telefónica España) es un despliegue white-label de Funambol
 OneMediaHub con una API propietaria (SAPI) y login MobileConnect (teléfono +
-SMS). No tiene S3, ni WebDAV, ni cliente Linux. funambridge hace de puente.
+SMS). No tiene WebDAV ni cliente Linux. funambridge hace de puente.
 
 Subcomandos:
-    serve        sirve el proxy S3 + WebDAV + panel web (por defecto)
+    serve        sirve el proxy WebDAV + panel web (por defecto)
     import-har   importa una sesión web desde un fichero HAR
     probe        prueba la autenticación de una cuenta
     dedupe       busca y repara copias duplicadas que dejaron subidas fallidas
@@ -23,7 +23,7 @@ import threading
 
 from . import config
 from .sapi import FunambolClient, SapiError
-from .s3 import Registry, Server
+from .server import Registry, Server
 
 log = logging.getLogger("funambridge")
 DEFAULT_CONFIG = os.environ.get("FUNAMBRIDGE_CONFIG", "config.yaml")
@@ -46,37 +46,35 @@ def _auth_kind(acc):
 def cmd_serve(cfg):
     registry = Registry(cfg)
     registry.start_keepalive()
-    s3 = Server((cfg.s3_host, cfg.s3_port), registry,
-                log=lambda m: log.info("%s", m))
+    srv = Server((cfg.host, cfg.port), registry,
+                 log=lambda m: log.info("%s", m))
     scheme = "http"
     if cfg.tls_cert and cfg.tls_key:
         from . import tls
         try:
             ctx = tls.server_context(cfg.tls_cert, cfg.tls_key)
-            s3.socket = ctx.wrap_socket(s3.socket, server_side=True)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
             scheme = "https"
             log.info("TLS activado (cert=%s)", cfg.tls_cert)
         except Exception as e:  # noqa: BLE001
             log.error("TLS deshabilitado (%s); sirviendo HTTP", e)
-    base = f"{scheme}://{cfg.s3_host}:{cfg.s3_port}"
-    if cfg.s3_host not in ("127.0.0.1", "localhost", "::1"):
-        sig = "on" if cfg.verify_s3_signature else "OFF"
-        log.warning("Binding %s -- reachable from your LAN/Docker network "
-                    "(S3 signature check: %s). Put it behind TLS/your own auth on "
-                    "untrusted networks.", cfg.s3_host, sig)
+    base = f"{scheme}://{cfg.host}:{cfg.port}"
+    if cfg.host not in ("127.0.0.1", "localhost", "::1"):
+        log.warning("Binding %s -- reachable from your LAN/Docker network. Put "
+                    "it behind TLS/your own auth on untrusted networks.", cfg.host)
     log.info("funambridge on %s", base)
     log.info("  admin UI : %s/_admin/   (open in a browser)", base)
-    log.info("  S3 API   : %s          (%d account(s))", base, len(cfg.accounts))
+    log.info("  WebDAV   : %s          (%d account(s))", base, len(cfg.accounts))
     for a in cfg.accounts:
-        log.info("    '%s'  access_key=%s  auth=%s",
+        log.info("    '%s'  usuario WebDAV=%s  auth=%s",
                  a.name, a.access_key, _auth_kind(a))
     if not cfg.accounts:
         log.info("  No accounts yet -- open %s/ to add one.", base)
     try:
-        s3.serve_forever()
+        srv.serve_forever()
     except KeyboardInterrupt:
         log.info("shutting down")
-        s3.shutdown()
+        srv.shutdown()
 
 
 def cmd_import_har(cfg, path, name):
@@ -87,10 +85,10 @@ def cmd_import_har(cfg, path, name):
     except (OSError, ValueError) as e:
         sys.exit(f"could not import HAR: {e}")
     print(f"Imported session for account '{acc.name}'.")
-    print(f"  access_key = {acc.access_key}")
-    print(f"  secret_key = {acc.secret_key}")
+    print(f"  usuario WebDAV    = {acc.access_key}")
+    print(f"  contraseña WebDAV = {acc.secret_key}")
     print(f"  validationkey: {'yes' if acc.session.validationkey else 'MISSING'}")
-    print("Run:  python o2cloud_s3_proxy.py probe " + acc.name + " -v")
+    print("Prueba:  python -m funambridge probe " + acc.name)
 
 
 def cmd_probe(cfg, name):
@@ -106,8 +104,9 @@ def cmd_probe(cfg, name):
     client.validate_session()
     print("session: VALID (tokens accepted)")
     from .store import Store
-    store = Store(client, cache_ttl=acc.cache_seconds, root_bucket=cfg.root_bucket)
-    print("buckets:", store.list_buckets() or "(none)")
+    store = Store(client, cache_ttl=acc.cache_seconds)
+    print("carpetas en la raíz:", store.children([])[0] or "(ninguna)")
+    print("límites de O2:", client.limits())
     try:
         print("storage:", str(client.storage_space())[:160])
     except SapiError as e:
@@ -141,14 +140,14 @@ def main(argv=None):
             pass
     p = argparse.ArgumentParser(
         prog="funambridge",
-        description="Accede a O2 Cloud (Funambol OneMediaHub) por S3 y WebDAV")
+        description="Accede a O2 Cloud (Funambol OneMediaHub) por WebDAV")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="ruta a config.yaml")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="DEBUG también por consola")
     p.add_argument("--log-file", default=None,
                    help="escribe un log extendido (DEBUG) a este fichero")
     sub = p.add_subparsers(dest="cmd")
-    sv = sub.add_parser("serve", help="run the S3 proxy + admin web UI")
+    sv = sub.add_parser("serve", help="run the WebDAV proxy + admin web UI")
     sv.add_argument("--host", default=None,
                     help="bind address override (e.g. 0.0.0.0 to allow other "
                          "machines on your LAN). Default: config value / 127.0.0.1")
@@ -195,9 +194,9 @@ def main(argv=None):
     cmd = args.cmd or "serve"
     if cmd == "serve":
         if getattr(args, "host", None):
-            cfg.s3_host = args.host
+            cfg.host = args.host
         if getattr(args, "port", None):
-            cfg.s3_port = args.port
+            cfg.port = args.port
         if getattr(args, "tls_cert", None):
             cfg.tls_cert = args.tls_cert
         if getattr(args, "tls_key", None):

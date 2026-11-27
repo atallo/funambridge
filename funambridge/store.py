@@ -1,9 +1,6 @@
 """
-Maps S3 (bucket, key) / WebDAV paths onto OneMediaHub folders/media for a single
-account.
-
-  bucket          = a folder directly under the account root
-  key "a/b/c.txt" = sub-folders a, b + file c.txt inside `bucket`
+Maps WebDAV paths onto OneMediaHub folders/media for a single account
+("a/b/c.txt" = sub-folders a, b + file c.txt, relative to the O2 root).
 
 Write cache: after O2 accepts an upload it takes a few/several seconds to make
 the item appear in listings/downloads (async processing). A short per-account
@@ -282,19 +279,21 @@ def _synth(e):
 class Download:
     """A file ready to serve: bytes in memory (`data`) or a file on disk
     (`path`) to stream. Exactly one of the two is set."""
-    __slots__ = ("ctype", "size", "etag", "data", "path")
+    __slots__ = ("ctype", "size", "etag", "data", "path", "opener")
 
-    def __init__(self, ctype, size, etag="", data=None, path=None):
+    def __init__(self, ctype, size, etag="", data=None, path=None, opener=None):
         self.ctype = ctype
         self.size = int(size)
         self.etag = etag or ""
         self.data = data
         self.path = path
+        # opener(start, end) -> Stream of those bytes straight from O2 (nothing
+        # is buffered: the bytes are relayed to the client as they arrive).
+        self.opener = opener
 
 
 class Store:
-    def __init__(self, client: FunambolClient, cache_ttl=0, root_bucket="",
-                 disk_dir=None):
+    def __init__(self, client: FunambolClient, cache_ttl=0, disk_dir=None):
         self.c = client
         self._lock = threading.RLock()
         self._folder_cache = {}
@@ -321,23 +320,11 @@ class Store:
                         os.remove(os.path.join(disk_dir, f))
                     except OSError:
                         pass
-        # Optional virtual bucket that maps to the O2 root, so the files sitting
-        # directly at the root (which ListBuckets can't show) are reachable via
-        # S3 inside this bucket. "" disables it.
-        self.root_bucket = root_bucket or ""
 
     def close(self):
         """Stop the cache sweeper (called when this Store is discarded)."""
         self._closed.set()
         self.cache.close()
-
-    def _base_parts(self, bucket):
-        """Path parts (relative to O2 root) for a bucket: [] for the virtual
-        root bucket, else [bucket]."""
-        if self.root_bucket and bucket == self.root_bucket:
-            return []
-        return [bucket]
-
 
     # -- folder resolution --------------------------------------------------
     def _children_folders(self, parent_id):
@@ -447,100 +434,6 @@ class Store:
         # PUTs of one file can't both create it (O2 would keep 'name' AND
         # 'name (1)'). The fixed pool bounds memory.
         return self._put_locks[hash((str(folder_id), name)) % len(self._put_locks)]
-
-    # -- buckets ------------------------------------------------------------
-    def list_buckets(self):
-        names = sorted(self._children_folders(self.c.root_id()).keys())
-        if self.root_bucket and self.root_bucket not in names:
-            names = [self.root_bucket] + names
-        return names
-
-    def create_bucket(self, name):
-        if name == self.root_bucket:
-            return                      # virtual bucket: nothing to create
-        self.resolve_folder([name], create=True)
-        self.invalidate()
-
-    def delete_bucket(self, name):
-        if name == self.root_bucket:
-            raise ValueError("cannot delete the virtual root bucket")
-        fid = self.resolve_folder([name])
-        if fid is None:
-            raise KeyError(name)
-        self.c.delete_folder(fid)
-        self.invalidate()
-
-    # -- objects (S3 bucket/key) -------------------------------------------
-    @staticmethod
-    def _split_key(key):
-        parts = [p for p in key.split("/") if p != ""]
-        if not parts:
-            return [], None
-        return parts[:-1], parts[-1]
-
-    def list_objects(self, bucket, prefix="", delimiter=""):
-        base = self._base_parts(bucket)
-        if base and self.resolve_folder(base) is None:
-            raise KeyError(bucket)
-        pdirs = [p for p in prefix.split("/")[:-1] if p]
-        base_id = self.resolve_folder(base + pdirs)
-        objects, common = [], set()
-        if base_id is None:
-            return objects, sorted(common)
-        base_prefix = "/".join(pdirs) + ("/" if pdirs else "")
-        seen = set()
-        for name, ent in self._index_items(base_id):
-            full = base_prefix + name
-            if not full.startswith(prefix):
-                continue
-            seen.add(name)
-            e = self.cache.get(base + pdirs + [name])     # freshest size if cached
-            if e is not None:
-                objects.append({"key": full, "size": e["size"],
-                                "etag": e["etag"], "modified": e["mtime"]})
-            else:
-                objects.append({"key": full, "size": ent["size"],
-                                "etag": ent.get("etag", ""),
-                                "modified": ent.get("modified")})
-        for e in self.cache.children(base + pdirs):       # not-yet-indexed uploads
-            if e["name"] in seen:
-                continue
-            full = base_prefix + e["name"]
-            if full.startswith(prefix):
-                objects.append({"key": full, "size": e["size"], "etag": e["etag"],
-                                "modified": e["mtime"]})
-        if delimiter == "/":
-            for sub in self._children_folders(base_id):
-                cp = base_prefix + sub + "/"
-                if cp.startswith(prefix) or prefix.startswith(cp):
-                    common.add(cp)
-        return objects, sorted(common)
-
-    def _find_item(self, bucket, key):
-        dirs, fname = self._split_key(key)
-        if fname is None:
-            return None
-        return self.find_media(self._base_parts(bucket) + dirs + [fname])
-
-    def head_object(self, bucket, key):
-        m = self._find_item(bucket, key)
-        if m is None:
-            return None
-        name = str(first(m, "name", "filename") or key)
-        ctype = (first(m, "contenttype", "mimetype")
-                 or mimetypes.guess_type(name)[0] or "application/octet-stream")
-        return {
-            "size": int(first(m, "size", "filesize") or 0),
-            "etag": str(first(m, "etag", "id") or ""),
-            "content_type": ctype,
-            "modified": first(m, "modificationdate", "creationdate"),
-        }
-
-    def get_object(self, bucket, key):
-        m = self._find_item(bucket, key)
-        if m is None:
-            return None
-        return self._download(m)
 
     def _overwrite(self, parts, folder_id, fname):
         """A PUT replaces. Delete any current item with this name before
@@ -701,21 +594,6 @@ class Store:
                 except OSError:
                     pass
 
-    def put_object(self, bucket, key, data, content_type):
-        dirs, fname = self._split_key(key)
-        if fname is None:
-            raise ValueError("empty key")
-        parts = self._base_parts(bucket) + dirs + [fname]
-        return self._finish_put(parts, len(data), hashlib.md5(data).hexdigest(),
-                                content_type, data, None)
-
-    def put_object_stream(self, bucket, key, size, content_type, reader):
-        dirs, fname = self._split_key(key)
-        if fname is None:
-            raise ValueError("empty key")
-        return self.put_stream(self._base_parts(bucket) + dirs + [fname],
-                               size, content_type, reader)
-
     def put_stream(self, parts, size, content_type, reader):
         """Stream an upload of declared length `size` from `reader` (the request
         body) without buffering the whole file in RAM."""
@@ -730,11 +608,6 @@ class Store:
                     pass
             raise ValueError(f"incomplete upload: got {total} of {size} bytes")
         return self._finish_put(parts, total, md5, content_type, data, path)
-
-    def delete_object(self, bucket, key):
-        dirs, fname = self._split_key(key)
-        if fname is not None:
-            self.delete_path(self._base_parts(bucket) + dirs + [fname])
 
     # -- path-based API (used by WebDAV; parts relative to the O2 root) ------
     def _obj(self, key, m):
@@ -819,9 +692,12 @@ class Store:
             if path and os.path.exists(path):
                 return Download(ctype, os.path.getsize(path), etag=etag, path=path)
             return None                  # content not retained (no disk dir / spill failed)
-        data, dctype = self.c.download(m)
-        return Download(dctype or ctype, len(data),
-                        etag=hashlib.md5(data).hexdigest(), data=data)
+        mid = first(m, "id", "mediaid")
+        size = int(first(m, "size", "filesize") or 0)
+        name = str(first(m, "name", "filename") or "")
+        ctype = mimetypes.guess_type(name)[0] or ctype
+        return Download(ctype, size, etag=str(first(m, "etag") or mid or ""),
+                        opener=lambda a, b, _id=mid: self.c.open_media(_id, a, b))
 
     def put_file(self, parts, data, content_type):
         if not parts:
@@ -838,9 +714,7 @@ class Store:
             return
         fid = self.resolve_folder(list(parts))
         if fid is not None:
-            self.c.delete_folder(fid)
-            with self._mi_lock:
-                self._media_index.pop(str(fid), None)   # folder gone
+            self._delete_folder(fid, "/".join(parts))
             self.invalidate()
             return
         m = self.find_media(parts)
@@ -857,6 +731,58 @@ class Store:
             parent = self.resolve_folder(list(parts[:-1]))
             if parent is not None:
                 self._index_pop(parent, parts[-1])
+
+    def _delete_folder(self, fid, label):
+        """Soft-delete a folder. O2 refuses to do it in one go when it holds
+        more items than folders.softdelete-updates-limit (FOL-1036, 1000 in
+        Nov 2026): then empty it first -- files one by one, sub-folders
+        recursively -- and delete the (now small) folder."""
+        try:
+            self.c.delete_folder(fid)
+        except SapiError as e:
+            if e.code != "FOL-1036" and "FOL-1036" not in str(e):
+                raise
+            log.info("'%s' tiene demasiados elementos para borrarla de una vez "
+                     "(FOL-1036); se vacía por partes", label)
+            for f in self.c.list_folders(fid):
+                sub = first(f, "id", "folderid")
+                if sub is not None:
+                    self._delete_folder(str(sub), label + "/" +
+                                        str(first(f, "name", "foldername")))
+            for m in self.c.list_media(fid):
+                mid = first(m, "id", "mediaid")
+                if mid:
+                    self.c.delete_media(mid)
+            self.c.delete_folder(fid)
+        with self._mi_lock:
+            self._media_index.pop(str(fid), None)   # folder gone
+
+    def stat_path(self, parts):
+        """Metadata of a file (for HEAD) without touching its content."""
+        m = self.find_media(parts)
+        if m is None:
+            return None
+        name = str(first(m, "name", "filename") or (parts[-1] if parts else ""))
+        return {"size": int(first(m, "size", "filesize") or 0),
+                "etag": str(first(m, "etag", "id") or ""),
+                "modified": first(m, "modificationdate", "creationdate"),
+                "ctype": mimetypes.guess_type(name)[0] or "application/octet-stream"}
+
+    def quota(self, max_age=60):
+        """(used, available) bytes of the account, cached briefly (WebDAV
+        quota properties are asked on every PROPFIND)."""
+        now = time.time()
+        q = getattr(self, "_quota", None)
+        if q and now - q[2] < max_age:
+            return q[0], q[1]
+        d = self.c.storage_space() or {}
+        used = int(d.get("used") or 0)
+        free = d.get("free")
+        if free is None and d.get("quota") is not None:
+            free = int(d["quota"]) - used
+        free = max(0, int(free or 0))
+        self._quota = (used, free, now)
+        return used, free
 
     def download_path(self, parts):
         m = self.find_media(parts)

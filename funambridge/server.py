@@ -1,14 +1,12 @@
 """
-S3-compatible front-end with per-account routing.
+HTTP server of funambridge: one port serving WebDAV (to O2 Cloud) and the
+admin web UI under /_admin.
 
-Each configured O2 account has its own access_key/secret_key. The S3 client
-picks the account by which access_key it signs with: we parse the access key out
-of the SigV4 `Authorization` header (we do NOT verify the signature -- bind to
-localhost). That access key selects the account whose captured session is used
-to talk to O2 Cloud.
+Each configured O2 account has its own WebDAV user/password (stored as
+access_key/secret_key in the config); the Basic-auth user picks the account
+whose O2 session is used.
 """
 
-import datetime as _dt
 import logging
 import os
 import re
@@ -17,18 +15,15 @@ import threading
 import time
 import urllib.parse
 import uuid
-import xml.sax.saxutils as _xml
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .sapi import FunambolClient, SapiError, SessionExpired
 from .store import Store
 from .admin import ADMIN_PREFIX, render_page, cache_rows
 from . import webdav
-from . import auth
 from . import config as _cfgmod
 
 log = logging.getLogger("funambridge.keepalive")
-_CRED_RE = re.compile(r"Credential=([^/,\s]+)")
 
 
 class Registry:
@@ -67,7 +62,6 @@ class Registry:
                                         on_token_refresh=_persist)
                 disk_dir = os.path.join(self._cache_base(), access_key)
                 st = Store(client, cache_ttl=acc.cache_seconds,
-                           root_bucket=self.config.root_bucket,
                            disk_dir=disk_dir)
                 self._stores[access_key] = st
             return st, acc
@@ -183,46 +177,6 @@ class Registry:
             return self._pending.pop(token or "", None)
 
 
-def _now_iso():
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def _esc(s):
-    return _xml.escape(str(s))
-
-
-def _http_date(_v):
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-
-
-def _iso(v):
-    if isinstance(v, (int, float)):
-        ts = v / 1000 if v > 1e11 else v
-        return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%S.000Z")
-    return _now_iso()
-
-
-def decode_aws_chunked(raw):
-    out = bytearray()
-    i, n = 0, len(raw)
-    while i < n:
-        j = raw.find(b"\r\n", i)
-        if j < 0:
-            break
-        size_hex = raw[i:j].split(b";", 1)[0].strip()
-        try:
-            size = int(size_hex, 16)
-        except ValueError:
-            return bytes(raw)
-        i = j + 2
-        if size == 0:
-            break
-        out += raw[i:i + size]
-        i += size + 2
-    return bytes(out)
-
-
 def _parse_multipart(body, content_type):
     """Minimal multipart/form-data parser (stdlib `cgi` is gone in 3.13+).
     Returns {field_name: bytes}."""
@@ -253,139 +207,23 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, addr, registry, log=print):
-        super().__init__(addr, S3Handler)
+        super().__init__(addr, Handler)
         self.registry = registry
         self.log = log
 
 
-class S3Handler(BaseHTTPRequestHandler):
-    server_version = "funambridge/2.0"
+class Handler(BaseHTTPRequestHandler):
+    server_version = "funambridge/3.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        self.server.log("s3: %s - %s" % (self.address_string(), fmt % args))
-
-    # -- routing ------------------------------------------------------------
-    def _host_candidates(self):
-        cands = []
-        xfh = self.headers.get("X-Forwarded-Host")
-        if xfh:
-            cands.append(xfh.split(",")[0].strip())
-        if self.headers.get("Host"):
-            cands.append(self.headers.get("Host"))
-        return cands
-
-    def _account_store(self):
-        cfg = self.server.registry.config
-        q = urllib.parse.urlparse(self.path).query
-        access_key = auth.extract_access_key(self.headers, q)
-        if not access_key:
-            self._error(403, "AccessDenied", "missing S3 credentials")
-            return None, None
-        acc = cfg.by_access_key(access_key)
-        if acc is None:
-            self._error(403, "InvalidAccessKeyId", "unknown access key")
-            return None, None
-        if not acc.s3_enabled:
-            self._error(403, "AccessDenied",
-                        f"S3 is disabled for account '{acc.name}'")
-            return None, None
-        # require a valid SigV4 signature (proves the client knows secret_key)
-        if cfg.verify_s3_signature:
-            ok = auth.is_sigv4(self.headers) and auth.verify(
-                self.command, self.path, self.headers, acc.secret_key,
-                self._host_candidates())
-            if not ok:
-                self._error(403, "SignatureDoesNotMatch",
-                            "S3 signature check failed (wrong secret_key, or a "
-                            "proxy altered the Host header)")
-                return None, None
-        try:
-            store, _ = self.server.registry.store_for(access_key)
-        except SessionExpired as e:
-            self._error(403, "AccessDenied", str(e))
-            return None, None
-        if store is None:
-            self._error(403, "AccessDenied", "account has no captured session")
-            return None, None
-        return store, acc
-
-    def _parse(self):
-        u = urllib.parse.urlparse(self.path)
-        path = urllib.parse.unquote(u.path)
-        qs = urllib.parse.parse_qs(u.query, keep_blank_values=True)
-        segs = [s for s in path.split("/") if s != ""]
-        bucket = segs[0] if segs else None
-        key = "/".join(segs[1:]) if len(segs) > 1 else ""
-        return bucket, key, qs
-
-    def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        raw = self.rfile.read(length) if length else b""
-        if "aws-chunked" in (self.headers.get("Content-Encoding", "") or "") or \
-           str(self.headers.get("x-amz-content-sha256", "")).startswith("STREAMING-"):
-            raw = decode_aws_chunked(raw)
-        return raw
-
-    # -- responses ----------------------------------------------------------
-    def _send_xml(self, status, root_xml, extra=None):
-        body = ('<?xml version="1.0" encoding="UTF-8"?>\n' + root_xml).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/xml")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("x-amz-request-id", uuid.uuid4().hex)
-        for k, v in (extra or {}).items():
-            self.send_header(k, v)
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
-
-    def _send_bytes(self, status, body, content_type, extra=None):
-        extra = dict(extra or {})
-        clen = extra.pop("Content-Length", str(len(body)))
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", clen)
-        self.send_header("Accept-Ranges", "bytes")
-        for k, v in extra.items():
-            self.send_header(k, v)
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
-
-    def _error(self, status, code, message):
-        xml = (f"<Error><Code>{_esc(code)}</Code>"
-               f"<Message>{_esc(message)}</Message>"
-               f"<RequestId>{uuid.uuid4().hex}</RequestId></Error>")
-        self._send_xml(status, xml)
-
-    def _guard(self, fn):
-        try:
-            store, acc = self._account_store()
-            if store is None:
-                return
-            fn(store)
-        except KeyError as e:
-            self._error(404, "NoSuchBucket", f"not found: {e}")
-        except SessionExpired as e:
-            self._error(403, "AccessDenied", f"{e}")
-        except SapiError as e:
-            self.server.log("SAPI error: %s" % e)
-            self._error(502, "InternalError", f"upstream O2 error: {e}")
-        except BrokenPipeError:
-            pass
-        except Exception as e:  # noqa: BLE001
-            self.server.log("handler error: %s" % e)
-            self._error(500, "InternalError", str(e))
-
-    # -- admin vs S3 dispatch ----------------------------------------------
-    def _has_s3_auth(self):
-        if self.headers.get("Authorization", "").startswith("AWS"):
-            return True
-        return any(k.lower().startswith("x-amz-") for k in self.headers.keys())
+        self.server.log("http: %s - %s" % (self.address_string(), fmt % args))
 
     def _wants_html(self):
         return "text/html" in (self.headers.get("Accept", "") or "")
+
+    def _not_found(self, msg="not found"):
+        return self._send_raw(404, msg, "text/plain; charset=utf-8")
 
     def _send_raw(self, status, body, ctype):
         data = body.encode("utf-8") if isinstance(body, str) else body
@@ -430,9 +268,11 @@ class S3Handler(BaseHTTPRequestHandler):
             res = store.browse(parts)
             try:
                 sp = store.c.storage_space() or {}
-                res["storage"] = {"used": sp.get("used"), "quota": sp.get("quota")}
+                res["storage"] = {"used": sp.get("used"), "quota": sp.get("quota"),
+                                  "trash": sp.get("softdeleted")}
             except SapiError:
                 pass
+            res["limits"] = store.c.limits()
             res.update(ok=True, path="/".join(parts),
                        checked=time.strftime("%H:%M:%S"))
             return out(res)
@@ -460,7 +300,7 @@ class S3Handler(BaseHTTPRequestHandler):
         # honour a fronting HTTPS reverse proxy when showing the endpoint
         host = (self.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
                 or self.headers.get("Host")
-                or f"{cfg.s3_host}:{cfg.s3_port}")
+                or f"{cfg.host}:{cfg.port}")
         scheme = (self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
                   or "http")
         endpoint = f"{scheme}://{host}"
@@ -575,19 +415,6 @@ class S3Handler(BaseHTTPRequestHandler):
             self.server.registry.drop(acc.access_key)
             return self._redirect(ADMIN_PREFIX + "/?msg=" +
                                   urllib.parse.quote(f"Claves actualizadas para '{acc.name}'"))
-        if path == ADMIN_PREFIX + "/toggle":
-            acc = cfg.by_name(form.get("name", [""])[0])
-            if acc is None:
-                return self._redirect(ADMIN_PREFIX + "/?err=cuenta+no+encontrada")
-            val = form.get("value", ["1"])[0] == "1"
-            what = form.get("what", [""])[0]
-            if what == "s3":
-                acc.s3_enabled = val
-            elif what == "webdav":
-                acc.webdav_enabled = val
-            cfg.save()
-            return self._redirect(ADMIN_PREFIX + "/?msg=" +
-                                  urllib.parse.quote(f"{what} {'on' if val else 'off'} en '{acc.name}'"))
         if path == ADMIN_PREFIX + "/cache":
             acc = cfg.by_name(form.get("name", [""])[0])
             if acc is None:
@@ -600,67 +427,52 @@ class S3Handler(BaseHTTPRequestHandler):
             self.server.registry.drop(acc.access_key)   # recrea el Store con el TTL nuevo
             return self._redirect(ADMIN_PREFIX + "/?msg=" +
                                   urllib.parse.quote(f"caché {acc.cache_seconds}s en '{acc.name}'"))
-        return self._error(404, "NoSuchKey", "admin route not found")
+        return self._not_found("admin route not found")
 
-    # -- WebDAV detection ---------------------------------------------------
-    def _is_dav(self, path):
-        # S3 wins if an AWS signature is present; otherwise a /dav path or HTTP
-        # Basic auth (and not the admin UI) means a WebDAV client.
-        if self._has_s3_auth():
-            return False
-        if path.startswith(webdav.DAV_PREFIX):
-            return True
-        return webdav.is_basic(self) and not path.startswith(ADMIN_PREFIX)
-
-    # -- verbs --------------------------------------------------------------
+    # -- routing: /_admin = panel, everything else = WebDAV -------------------
     def _admin_on(self):
         return self.server.registry.config.admin_enabled
 
+    def _path(self):
+        return urllib.parse.urlparse(self.path).path
+
+    def _is_admin(self, path):
+        return path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+
     def do_GET(self):
-        path = urllib.parse.urlparse(self.path).path
-        if self._is_dav(path):
-            return webdav.handle(self, "GET")
-        if path.startswith(ADMIN_PREFIX):
+        path = self._path()
+        if self._is_admin(path):
             if not self._admin_on():
-                return self._error(404, "NoSuchKey", "admin panel disabled")
+                return self._not_found("admin panel disabled")
             return self._admin_get(path)
-        if path == "/" and not self._has_s3_auth() and self._wants_html():
+        if path == "/" and not webdav.is_basic(self) and self._wants_html():
+            # a browser opening the root: show the panel
             if self._admin_on():
                 return self._redirect(ADMIN_PREFIX + "/")
-            return self._send_raw(404, "admin panel disabled", "text/plain")
-        self._guard(self._get)
+        return webdav.handle(self, "GET")
 
     def do_HEAD(self):
-        path = urllib.parse.urlparse(self.path).path
-        if self._is_dav(path):
-            return webdav.handle(self, "HEAD")
-        if path.startswith(ADMIN_PREFIX):
+        path = self._path()
+        if self._is_admin(path):
             if not self._admin_on():
-                return self._error(404, "NoSuchKey", "admin panel disabled")
+                return self._not_found("admin panel disabled")
             return self._admin_get(path)
-        self._guard(self._head)
-
-    def do_PUT(self):
-        path = urllib.parse.urlparse(self.path).path
-        if self._is_dav(path):
-            return webdav.handle(self, "PUT")
-        self._guard(self._put)
-
-    def do_DELETE(self):
-        path = urllib.parse.urlparse(self.path).path
-        if self._is_dav(path):
-            return webdav.handle(self, "DELETE")
-        self._guard(self._delete)
+        return webdav.handle(self, "HEAD")
 
     def do_POST(self):
-        path = urllib.parse.urlparse(self.path).path
-        if path.startswith(ADMIN_PREFIX):
+        path = self._path()
+        if self._is_admin(path):
             if not self._admin_on():
-                return self._error(404, "NoSuchKey", "admin panel disabled")
+                return self._not_found("admin panel disabled")
             return self._admin_post(path)
-        self._error(501, "NotImplemented", "POST is not supported")
+        return self._send_raw(405, "POST is not supported", "text/plain")
 
-    # -- WebDAV methods -----------------------------------------------------
+    def do_PUT(self):
+        webdav.handle(self, "PUT")
+
+    def do_DELETE(self):
+        webdav.handle(self, "DELETE")
+
     def do_OPTIONS(self):
         webdav.handle(self, "OPTIONS")
 
@@ -684,109 +496,3 @@ class S3Handler(BaseHTTPRequestHandler):
 
     def do_UNLOCK(self):
         webdav.handle(self, "UNLOCK")
-
-    # -- handlers -----------------------------------------------------------
-    def _get(self, store):
-        bucket, key, qs = self._parse()
-        if bucket is None:
-            return self._list_buckets(store)
-        if key == "":
-            return self._list_objects(store, bucket, qs)
-        return self._get_object(store, bucket, key)
-
-    def _head(self, store):
-        bucket, key, _ = self._parse()
-        if bucket is None:
-            return self._send_bytes(200, b"", "application/xml")
-        if key == "":
-            if bucket in store.list_buckets():
-                return self._send_bytes(200, b"", "application/xml")
-            return self._error(404, "NoSuchBucket", bucket)
-        meta = store.head_object(bucket, key)
-        if meta is None:
-            return self._error(404, "NoSuchKey", key)
-        return self._send_bytes(200, b"", meta["content_type"], {
-            "ETag": f'"{meta["etag"]}"',
-            "Last-Modified": _http_date(meta.get("modified")),
-            "Content-Length": str(meta["size"]),
-        })
-
-    def _put(self, store):
-        bucket, key, _ = self._parse()
-        if bucket is None:
-            return self._error(400, "InvalidRequest", "missing bucket")
-        if key == "":
-            self._read_body()                       # drain any body, then create
-            store.create_bucket(bucket)
-            return self._send_bytes(200, b"", "application/xml")
-        ctype = self.headers.get("Content-Type", "application/octet-stream")
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        ce = self.headers.get("Content-Encoding", "") or ""
-        sha = str(self.headers.get("x-amz-content-sha256", ""))
-        aws_chunked = "aws-chunked" in ce or sha.startswith("STREAMING-")
-        te = (self.headers.get("Transfer-Encoding", "") or "").lower()
-        if "chunked" in te and not aws_chunked:
-            # HTTP chunked body with no length: refuse rather than store empty
-            self.close_connection = True
-            return self._error(411, "MissingContentLength",
-                               "chunked PUT bodies are not supported")
-        if aws_chunked:
-            # aws-chunked framing is decoded in RAM (correctness over memory)
-            etag = store.put_object(bucket, key, self._read_body(), ctype)
-        else:
-            try:
-                etag = store.put_object_stream(bucket, key, length, ctype,
-                                               self.rfile)
-            except Exception:        # body half-read -> connection unsafe to reuse
-                self.close_connection = True
-                raise
-        return self._send_bytes(200, b"", "application/xml",
-                                {"ETag": f'"{etag}"'})
-
-    def _delete(self, store):
-        bucket, key, _ = self._parse()
-        if bucket is None:
-            return self._error(400, "InvalidRequest", "missing bucket")
-        if key == "":
-            store.delete_bucket(bucket)
-        else:
-            store.delete_object(bucket, key)
-        return self._send_bytes(204, b"", "application/xml")
-
-    # -- bodies -------------------------------------------------------------
-    def _list_buckets(self, store):
-        buckets = "".join(
-            f"<Bucket><Name>{_esc(b)}</Name>"
-            f"<CreationDate>{_now_iso()}</CreationDate></Bucket>"
-            for b in store.list_buckets())
-        xml = (f"<ListAllMyBucketsResult><Owner><ID>o2cloud</ID>"
-               f"<DisplayName>o2cloud</DisplayName></Owner>"
-               f"<Buckets>{buckets}</Buckets></ListAllMyBucketsResult>")
-        self._send_xml(200, xml)
-
-    def _list_objects(self, store, bucket, qs):
-        prefix = qs.get("prefix", [""])[0]
-        delimiter = qs.get("delimiter", [""])[0]
-        objs, common = store.list_objects(bucket, prefix, delimiter)
-        contents = "".join(
-            f"<Contents><Key>{_esc(o['key'])}</Key>"
-            f"<LastModified>{_iso(o.get('modified'))}</LastModified>"
-            f"<ETag>&quot;{_esc(o['etag'])}&quot;</ETag>"
-            f"<Size>{o['size']}</Size>"
-            f"<StorageClass>STANDARD</StorageClass></Contents>" for o in objs)
-        cps = "".join(f"<CommonPrefixes><Prefix>{_esc(p)}</Prefix>"
-                      f"</CommonPrefixes>" for p in common)
-        is_v2 = qs.get("list-type", ["1"])[0] == "2"
-        kc = f"<KeyCount>{len(objs) + len(common)}</KeyCount>" if is_v2 else ""
-        xml = (f"<ListBucketResult><Name>{_esc(bucket)}</Name>"
-               f"<Prefix>{_esc(prefix)}</Prefix>"
-               f"<Delimiter>{_esc(delimiter)}</Delimiter>"
-               f"<MaxKeys>1000</MaxKeys>{kc}<IsTruncated>false</IsTruncated>"
-               f"{contents}{cps}</ListBucketResult>")
-        self._send_xml(200, xml)
-
-    def _get_object(self, store, bucket, key):
-        dl = store.get_object(bucket, key)
-        if dl is None:
-            return self._error(404, "NoSuchKey", key)
-        webdav.send_download(self, dl, self.headers.get("Range"))

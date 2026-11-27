@@ -1,5 +1,5 @@
 """
-Optional built-in TLS, so S3/WebDAV clients that insist on HTTPS can connect
+Optional built-in TLS, so WebDAV clients that insist on HTTPS can connect
 directly (without a fronting reverse proxy). In production you'd normally
 terminate TLS at your own proxy instead.
 

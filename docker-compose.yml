@@ -3,7 +3,7 @@ services:
     build: .
     container_name: funambridge
     restart: unless-stopped
-    # Un único puerto (S3 + WebDAV + panel). Pon un proxy TLS delante para HTTPS;
+    # Un único puerto (WebDAV + panel). Pon un proxy TLS delante para HTTPS;
     # debe reenviar X-Forwarded-Proto / X-Forwarded-Host.
     ports:
       - "9000:9000"

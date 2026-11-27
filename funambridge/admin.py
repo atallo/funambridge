@@ -1,9 +1,9 @@
 """
 Admin web UI for funambridge.
 
-Rendered by the *same* HTTP server as the S3 API (single port). The S3 handler
-dispatches browser requests here; this module is just the HTML, with
-no server of its own. Admin routes live under the ADMIN_PREFIX.
+Rendered by the *same* HTTP server as WebDAV (single port); this module is
+just the HTML, with no server of its own. Admin routes live under the
+ADMIN_PREFIX.
 """
 
 import html
@@ -22,8 +22,8 @@ _COPY_JS = ("function o2copy(id){var t=document.getElementById(id);"
             "}")
 
 
-def _split_endpoint(s3ep):
-    scheme, _, netloc = s3ep.partition("://")
+def _split_endpoint(ep):
+    scheme, _, netloc = ep.partition("://")
     if ":" in netloc:
         host, port = netloc.rsplit(":", 1)
     else:
@@ -121,8 +121,13 @@ def _explorer_card(cfg):
     fbExPath=d.path||'';
     var s='✓ Credenciales válidas · comprobado a las '+d.checked;
     if(d.storage&&d.storage.quota){{
-      s+=' · usado '+fbExHuman(d.storage.used)+' de '+fbExHuman(d.storage.quota);}}
+      s+=' · usado '+fbExHuman(d.storage.used)+' de '+fbExHuman(d.storage.quota);
+      if(d.storage.trash) s+=' (+ '+fbExHuman(d.storage.trash)+' en la papelera)';}}
     st.className='tag ok exstat'; st.textContent=s;
+    if(d.limits){{note.dataset.lim='Límites de O2: ficheros de hasta '+
+      fbExHuman(d.limits.max_upload)+' · la papelera se vacía sola a los '+
+      d.limits.trash_days+' días · máx. '+d.limits.folder_ops+
+      ' elementos por borrado de carpeta';}}
     var parts=fbExPath?fbExPath.split('/'):[], h='<a href="#" data-p="">raíz</a>', acc='';
     for(var i=0;i<parts.length;i++){{acc+=(i?'/':'')+parts[i];
       h+=' / <a href="#" data-p="'+fbExEsc(acc)+'">'+fbExEsc(parts[i])+'</a>';}}
@@ -139,7 +144,8 @@ def _explorer_card(cfg):
     if(!rows) rows="<tr><td colspan='3' class='muted' style='text-align:center;padding:18px'>Carpeta vacía.</td></tr>";
     tb.innerHTML=rows; tbl.style.display='';
     note.textContent=d.folders.length+' carpetas · '+d.total_files+' ficheros'+
-      (d.total_files>d.files.length?' (mostrando los '+d.files.length+' primeros)':'');
+      (d.total_files>d.files.length?' (mostrando los '+d.files.length+' primeros)':'')+
+      (note.dataset.lim?' — '+note.dataset.lim:'');
   }}
   document.getElementById('fb-ex').addEventListener('click',function(ev){{
     var a=ev.target.closest('a[data-p]'); if(!a) return;
@@ -236,18 +242,8 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
                 pending=None, alive=None):
     msg = html.escape(msg or "")
     err = html.escape(err or "")
-    s3ep = endpoint or f"http://{cfg.s3_host}:{cfg.s3_port}"
-    host, port, tls = _split_endpoint(s3ep)
-
-    def toggle(name, what, on):
-        cls = "pill on" if on else "pill off"
-        label = ("S3" if what == "s3" else "WebDAV")
-        return (f'<form method="post" action="{ADMIN_PREFIX}/toggle" style="display:inline">'
-                f'<input type="hidden" name="name" value="{name}">'
-                f'<input type="hidden" name="what" value="{what}">'
-                f'<input type="hidden" name="value" value="{0 if on else 1}">'
-                f'<button class="{cls}" title="clic para cambiar">'
-                f'{"● " if on else "○ "}{label}</button></form>')
+    ep = endpoint or f"http://{cfg.host}:{cfg.port}"
+    host, port, tls = _split_endpoint(ep)
 
     rows = ""
     for i, a in enumerate(cfg.accounts):
@@ -268,13 +264,13 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
         <tr>
           <td><div class="acc">{nm}</div><div class="muted small">{html.escape(a.phone)}</div></td>
           <td>
-            <div class="keyrow"><span class="klbl">AK</span>
+            <div class="keyrow"><span class="klbl">Usuario</span>
               <input id="ak{i}" class="mono" readonly value="{ak}">
               <button type="button" class="ghost" onclick="o2copy('ak{i}')">Copiar</button></div>
-            <div class="keyrow"><span class="klbl">SK</span>
+            <div class="keyrow"><span class="klbl">Contraseña</span>
               <input id="sk{i}" class="mono" readonly value="{sk}">
               <button type="button" class="ghost" onclick="o2copy('sk{i}')">Copiar</button></div>
-            <details class="mt"><summary class="link">Cambiar claves</summary>
+            <details class="mt"><summary class="link">Cambiar usuario / contraseña</summary>
              <div class="pop">
               <form method="post" action="{ADMIN_PREFIX}/keys">
                 <input type="hidden" name="name" value="{nm}">
@@ -284,14 +280,12 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
                 <span class="lbl">Fijar manualmente</span>
                 <input type="hidden" name="name" value="{nm}">
                 <input type="hidden" name="mode" value="set">
-                <input name="access_key" placeholder="access_key">
-                <input name="secret_key" placeholder="secret_key">
+                <input name="access_key" placeholder="usuario">
+                <input name="secret_key" placeholder="contraseña">
                 <button class="pri">Fijar</button></form>
              </div>
             </details>
           </td>
-          <td>{toggle(nm, "s3", a.s3_enabled)}</td>
-          <td>{toggle(nm, "webdav", a.webdav_enabled)}</td>
           <td>
             <form method="post" action="{ADMIN_PREFIX}/cache" style="display:flex;gap:5px;align-items:center">
               <input type="hidden" name="name" value="{nm}">
@@ -350,7 +344,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
           </td>
         </tr>"""
     if not rows:
-        rows = ('<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">'
+        rows = ('<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">'
                 'No hay cuentas todavía. Pulsa «Añadir cuenta nueva».</td></tr>')
 
     banner = ""
@@ -398,7 +392,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
  .tag.ok{{background:#e7f6ec;color:var(--ok)}} .tag.bad{{background:#fdecec;color:var(--bad)}}
  .keyrow{{display:flex;gap:6px;align-items:center;margin:3px 0}}
  .keyrow input{{flex:1;min-width:90px;font-size:13px}}
- .klbl{{font-size:11px;color:var(--muted);width:20px}}
+ .klbl{{font-size:11px;color:var(--muted);width:66px}}
  .mt{{margin-top:8px}} .inline input{{margin-right:6px}}
  summary.link{{color:var(--pri);cursor:pointer;font-size:13px;list-style:none;
    display:inline-flex;align-items:center;gap:6px;user-select:none}}
@@ -467,7 +461,7 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
 <div class="wrap">
  <div class="top">
   <div><h1>funambridge <span class="ver">v{html.escape(__version__)}</span></h1>
-   <p class="sub">Acceso a O2 Cloud por <b>S3</b> y <b>WebDAV</b></p></div>
+   <p class="sub">Acceso a O2 Cloud por <b>WebDAV</b> (Hyper Backup, rclone, unidades de red…)</p></div>
   <a class="o2link" href="{O2_WEB}" target="_blank" rel="noopener"
      title="{O2_WEB}">Abrir O2 Cloud ↗</a>
  </div>
@@ -475,22 +469,18 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
  {_pending_card(pending)}
 
  <div class="card">
-  <h2>Conexión &nbsp;·&nbsp; <span id="cx-ep" class="muted" style="text-transform:none;letter-spacing:0">{html.escape(s3ep)}</span></h2>
+  <h2>Conexión WebDAV</h2>
   <div class="grid">
    <div>
-    <div class="kv"><b>WebDAV</b></div>
-    <div class="kv"><b>URL</b> <code id="cx-url">{html.escape(s3ep)}</code></div>
-    <div class="kv"><b>Usuario</b> el <code>access_key</code> de la cuenta</div>
-    <div class="kv"><b>Contraseña</b> el <code>secret_key</code></div>
+    <div class="kv"><b>URL</b> <code id="cx-url">{html.escape(ep)}</code></div>
+    <div class="kv"><b>Usuario</b> el de la cuenta (abajo)</div>
+    <div class="kv"><b>Contraseña</b> la de la cuenta</div>
    </div>
    <div>
-    <div class="kv"><b>S3</b></div>
-    <div class="kv"><b>Host</b> <code id="cx-host">{html.escape(host)}</code> <span class="muted small">(solo el host, sin http:// ni puerto)</span></div>
+    <div class="kv"><b>Hyper Backup</b> <span class="muted small">destino «WebDAV»</span></div>
+    <div class="kv"><b>Servidor</b> <code id="cx-host">{html.escape(host)}</code></div>
     <div class="kv"><b>Puerto</b> <code id="cx-port">{html.escape(port)}</code></div>
-    <div class="kv"><b>TLS / cifrado</b> <span id="cx-tls">{tls}</span></div>
-    <div class="kv"><b>Direccionamiento</b> <code>path-style</code></div>
-    {("<div class='kv'><b>Ficheros de la raíz</b> en el bucket virtual <code>"
-      + html.escape(cfg.root_bucket) + "</code></div>") if cfg.root_bucket else ""}
+    <div class="kv"><b>HTTPS</b> <span id="cx-tls">{tls}</span></div>
    </div>
   </div>
  </div>
@@ -499,25 +489,24 @@ def render_page(cfg, msg="", err="", endpoint=None, cache_overview=None,
     var https = location.protocol === 'https:';
     var port = location.port || (https ? '443' : '80');
     var set = function(id,v){{var e=document.getElementById(id); if(e) e.textContent=v;}};
-    set('cx-ep', location.origin);
     set('cx-url', location.origin);
     set('cx-host', location.hostname);
     set('cx-port', port);
-    set('cx-tls', https ? 'Sí (HTTPS)' : 'No (HTTP)');
+    set('cx-tls', https ? 'Sí' : 'No');
   }})();
  </script>
 
  <div class="card">
   <h2>Cuentas</h2>
   <table>
-   <thead><tr><th>Cuenta</th><th>Claves</th><th>S3</th><th>WebDAV</th><th>Caché</th><th>Auth</th><th>Acciones</th></tr></thead>
+   <thead><tr><th>Cuenta</th><th>Acceso WebDAV</th><th>Caché</th><th>Sesión</th><th>Acciones</th></tr></thead>
    <tbody>{rows}</tbody>
   </table>
   <details class="add mt">
    <summary><span class="addhead">＋ Añadir cuenta nueva</span></summary>
    <div class="addbody">
-    <p class="muted">Para <b>actualizar</b> la sesión de una cuenta existente sin perder sus
-    claves, usa «Renovar sesión» en su fila.</p>
+    <p class="muted">Para <b>actualizar</b> la sesión de una cuenta existente sin perder su
+    usuario y contraseña WebDAV, usa «Renovar sesión» en su fila.</p>
 
     <h3>Opción A — Iniciar sesión con tu número (recomendado)</h3>
     <p class="muted small">El proxy inicia sesión en O2 por sí mismo: te llega un SMS y

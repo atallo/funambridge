@@ -17,11 +17,14 @@ from the APK -- see docs/apk-auth-ref/):
 """
 
 import base64
+import http.client
 import http.cookiejar
 import json
 import logging
 import re
+import ssl
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -142,6 +145,104 @@ class _MultipartBody:
         return bytes(out)
 
 
+# Connection errors that mean "the kept-alive socket was already dead": the
+# request can be repeated once on a fresh connection.
+_STALE = (http.client.RemoteDisconnected, http.client.CannotSendRequest,
+          http.client.BadStatusLine, ConnectionResetError, BrokenPipeError,
+          ConnectionAbortedError)
+
+_SSL_CTX = ssl.create_default_context()
+
+
+class _Pool:
+    """Persistent HTTP(S) connections, one per (thread, host).
+
+    urllib opens (and throws away) a TCP+TLS connection per request. A backup
+    makes thousands of small SAPI calls, so sockets pile up in TIME_WAIT until
+    the container runs out of local ports ("[Errno 99] Cannot assign requested
+    address") and every call pays a TLS handshake. Keeping one connection per
+    handler thread and host fixes both. Thread-local, so no locking is needed:
+    a thread never interleaves two requests on its connection."""
+
+    def __init__(self):
+        self._tl = threading.local()
+
+    def get(self, scheme, netloc, timeout):
+        conns = getattr(self._tl, "conns", None)
+        if conns is None:
+            conns = self._tl.conns = {}
+        key = (scheme, netloc)
+        c = conns.get(key)
+        fresh = c is None
+        if fresh:
+            if scheme == "https":
+                c = http.client.HTTPSConnection(netloc, timeout=timeout,
+                                                context=_SSL_CTX)
+            else:
+                c = http.client.HTTPConnection(netloc, timeout=timeout)
+            conns[key] = c
+        c.timeout = timeout
+        if c.sock is not None:
+            c.sock.settimeout(timeout)
+        return c, fresh
+
+    def drop(self, scheme, netloc):
+        c = getattr(self._tl, "conns", {}).pop((scheme, netloc), None)
+        if c is not None:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+class _HdrView:
+    """Minimal response-like wrapper: `.headers.get()` over response headers."""
+
+    def __init__(self, msg):
+        self.headers = msg
+
+
+class _CookieResp:
+    """Adapter so CookieJar.extract_cookies() can read an http.client response."""
+
+    def __init__(self, resp):
+        self._r = resp
+
+    def info(self):
+        return self._r.msg
+
+
+class Stream:
+    """A streaming download (body of a pooled connection). Read it to the end
+    or close() it: a half-read connection cannot be reused, so close() drops it
+    from the pool."""
+
+    def __init__(self, resp, release):
+        self.resp = resp
+        self.status = resp.status
+        self.headers = resp.msg
+        self._release = release
+        self._done = False
+
+    def read(self, n=-1):
+        b = self.resp.read(n) if n and n > 0 else self.resp.read()
+        if not b:
+            self.close()
+        return b
+
+    def close(self):
+        if self._done:
+            return
+        self._done = True
+        self._release(self.resp.isclosed())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
 class FunambolClient:
     def __init__(self, base_url, device_id, oauth=None, session=None,
                  on_token_refresh=None,
@@ -157,6 +258,9 @@ class FunambolClient:
         self._jar = http.cookiejar.CookieJar()
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self._jar))
+        self._pool = _Pool()
+        self._info, self._info_at = None, 0.0     # /system/information cache
+        self._dl_urls = {}                       # media id -> (signed url, ts)
         self.validationkey = None
         self._lock = threading.RLock()
         self._root_id = None
@@ -252,48 +356,32 @@ class FunambolClient:
         return h
 
     def _raw(self, method, path, *, data=None, headers=None, extra_query=None,
-             base=None, timeout=None):
+             base=None, timeout=None, pooled=True):
         url = self._url(path, extra_query, base)
         # data may be bytes or a seekable file-like (streamed upload); rewind so
         # a retry (token refresh) re-sends from the start instead of EOF.
-        if data is not None and hasattr(data, "seek"):
-            try:
-                data.seek(0)
-            except (OSError, ValueError):
-                pass
         n = len(data) if isinstance(data, (bytes, bytearray)) else None
         log.debug("SAPI -> %s %s%s", method, _redact(url),
                   f" ({n}B body)" if n is not None else (" (stream)" if data else ""))
-        req = urllib.request.Request(url, data=data, method=method,
-                                     headers=self._headers(headers))
-        try:
-            resp = self._opener.open(req, timeout=timeout or self.timeout)
-        except urllib.error.HTTPError as e:
-            self._absorb_refreshed_token(e)
-            body = e.read()
-            log.debug("SAPI <- %s %s HTTP %s: %s", method, _redact(url), e.code,
+        status, hdrs, body = self._send(method, url, data, self._headers(headers),
+                                        timeout or self.timeout, pooled=pooled)
+        self._absorb_refreshed_token(_HdrView(hdrs))
+        if status >= 400:
+            log.debug("SAPI <- %s %s HTTP %s: %s", method, _redact(url), status,
                       body[:300].decode("utf-8", "replace"))
-            if e.code in (401, 403):
+            if status in (401, 403):
                 newvk = None
                 try:
                     newvk = _fresh_validationkey(json.loads(body.decode("utf-8")))
                 except (ValueError, UnicodeDecodeError):
                     pass
                 raise SessionExpired(
-                    f"{method} {path}: unauthorized (HTTP {e.code}); tokens may "
-                    f"be expired -- re-capture the login", status=e.code,
+                    f"{method} {path}: unauthorized (HTTP {status}); tokens may "
+                    f"be expired -- re-capture the login", status=status,
                     new_validationkey=newvk)
-            raise SapiError(f"{method} {path} -> HTTP {e.code}: "
-                            f"{body[:160].decode('utf-8','replace')}", status=e.code)
-        except urllib.error.URLError as e:
-            log.debug("SAPI xx %s %s connection error: %s", method, _redact(url),
-                      e.reason)
-            raise SapiError(f"{method} {path} -> connection error: {e.reason}")
-        except OSError as e:              # socket timeout / reset mid-request
-            log.debug("SAPI xx %s %s I/O error: %s", method, _redact(url), e)
-            raise SapiError(f"{method} {path} -> I/O error: {e}")
-        log.debug("SAPI <- %s %s HTTP %s", method, _redact(url), resp.status)
-        self._absorb_refreshed_token(resp)
+            raise SapiError(f"{method} {path} -> HTTP {status}: "
+                            f"{body[:160].decode('utf-8','replace')}", status=status)
+        log.debug("SAPI <- %s %s HTTP %s", method, _redact(url), status)
         if self.cookie_mode:
             # the server may rotate validationKey via Set-Cookie; keep the query
             # param in sync with whatever is now in the jar.
@@ -301,7 +389,73 @@ class FunambolClient:
                 for c in list(self._jar):     # copy: the opener may mutate it
                     if c.name == "validationKey" and c.value:
                         self.validationkey = c.value
-        return resp, resp.read()
+        return _HdrView(hdrs), body
+
+    def _send(self, method, url, data, headers, timeout, pooled=True, stream=False):
+        """One HTTP exchange with cookies. Kept-alive connection by default;
+        `pooled=False` uses a fresh one (uploads: a big body must never be
+        replayed blindly on a socket that turned out to be dead). Returns
+        (status, headers, body) or, with stream=True, (status, headers, Stream).
+        Redirects are not followed (SAPI does not redirect)."""
+        u = urllib.parse.urlsplit(url)
+        target = u.path + ("?" + u.query if u.query else "")
+        req = urllib.request.Request(url, method=method, headers=headers)
+        self._jar.add_cookie_header(req)
+        hdrs = dict(req.header_items())
+        replayable = data is None or isinstance(data, (bytes, bytearray)) or \
+            hasattr(data, "seek")
+        for attempt in (0, 1):
+            if pooled:
+                conn, fresh = self._pool.get(u.scheme, u.netloc, timeout)
+            else:
+                fresh = True
+                conn = (http.client.HTTPSConnection(u.netloc, timeout=timeout,
+                                                    context=_SSL_CTX)
+                        if u.scheme == "https" else
+                        http.client.HTTPConnection(u.netloc, timeout=timeout))
+            try:
+                if data is not None and hasattr(data, "seek"):
+                    data.seek(0)
+                conn.request(method, target, body=data, headers=hdrs)
+                resp = conn.getresponse()
+            except _STALE as e:
+                self._close(conn, u, pooled)
+                if not fresh and replayable and attempt == 0:
+                    log.debug("SAPI .. %s %s: kept-alive connection was closed "
+                              "(%s); retrying on a new one", method, _redact(url),
+                              type(e).__name__)
+                    continue
+                log.debug("SAPI xx %s %s connection error: %s", method,
+                          _redact(url), e)
+                raise SapiError(f"{method} {u.path} -> connection error: {e}")
+            except OSError as e:          # timeout, refused, DNS, no local port...
+                self._close(conn, u, pooled)
+                log.debug("SAPI xx %s %s I/O error: %s", method, _redact(url), e)
+                raise SapiError(f"{method} {u.path} -> I/O error: {e}")
+            self._jar.extract_cookies(_CookieResp(resp), req)
+            if stream:
+                def release(done, _c=conn):
+                    if not done or not pooled:
+                        self._close(_c, u, pooled)
+                return resp.status, resp.msg, Stream(resp, release)
+            try:
+                body = resp.read()
+            except OSError as e:
+                self._close(conn, u, pooled)
+                raise SapiError(f"{method} {u.path} -> I/O error: {e}")
+            if not pooled or resp.will_close:
+                self._close(conn, u, pooled)
+            return resp.status, resp.msg, body
+        raise SapiError(f"{method} {u.path} -> connection error")  # not reached
+
+    def _close(self, conn, u, pooled):
+        if pooled:
+            self._pool.drop(u.scheme, u.netloc)
+        else:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _json(self, method, path, **kw):
         resp, body = self._raw(method, path, **kw)
@@ -389,7 +543,39 @@ class FunambolClient:
     def system_information(self):
         d = self._json("GET", SAPI["system"])
         self.download_base = first(d, "downloadurl", "downloadUrl")
+        with self._lock:
+            self._info, self._info_at = d, time.time()
         return d
+
+    def info(self, max_age=6 * 3600):
+        """/sapi/system/information (public; what the web app reads at start),
+        cached. Empty dict if it cannot be fetched -- callers use defaults."""
+        with self._lock:
+            if self._info is not None and time.time() - self._info_at < max_age:
+                return self._info
+        try:
+            return self.system_information()
+        except SapiError as e:
+            log.debug("system information: %s", e)
+            with self._lock:
+                self._info_at = time.time() - max_age + 300   # retry in 5 min
+                return self._info or {}
+
+    def limits(self):
+        """Account limits announced by O2 (with safe defaults)."""
+        d = self.info()
+
+        def num(key, default):
+            try:
+                return int(str(d.get(key, default)).strip())
+            except (TypeError, ValueError):
+                return default
+        return {
+            "max_upload": num("sapi.upload.max-size-in-mb", 4096) * 1024 * 1024,
+            "folder_ops": num("folders.softdelete-updates-limit", 1000),
+            "trash_days": num("trash.cleanup.items-expire-time-in-minutes",
+                              86400) // 1440,
+        }
 
     def validate_session(self):
         return self._call("GET", SAPI["profile"])
@@ -475,7 +661,11 @@ class FunambolClient:
         return self._call("GET", SAPI["storage"])
 
     def _upload_base(self):
-        """O2 serves uploads from a dedicated host: upload.<web host>."""
+        """Upload host as announced in /system/information
+        ("sapi.upload.endpoint"); falls back to upload.<web host>."""
+        ep = str(self.info().get("sapi.upload.endpoint") or "").strip().rstrip("/")
+        if ep.startswith("https://"):
+            return ep
         p = urllib.parse.urlparse(self.base)
         return f"{p.scheme}://upload.{p.netloc}"
 
@@ -510,7 +700,7 @@ class FunambolClient:
         # what made clients retry an upload O2 had in fact stored -> duplicates.
         tmo = max(self.timeout, 120 + size // (1 << 20))
         d = self._call("POST", "/sapi/upload?action=save", data=stream,
-                       base=self._upload_base(), timeout=tmo,
+                       base=self._upload_base(), timeout=tmo, pooled=False,
                        headers={"Content-Type":
                                 f"multipart/form-data; boundary={boundary}",
                                 "Content-Length": str(stream.length)})
@@ -532,10 +722,49 @@ class FunambolClient:
         return self.base + url if url.startswith("/") else url
 
     def open_download(self, media_id, timeout=600):
-        """Open a streaming download of a media item (caller reads/closes)."""
-        req = urllib.request.Request(self.download_url(media_id),
-                                     headers=self._headers())
-        return self._opener.open(req, timeout=timeout)
+        """Open a streaming download of a whole media item (caller reads/closes)."""
+        return self.open_media(media_id, timeout=timeout)
+
+    _URL_TTL = 20 * 60          # signed download urls are reused for a while
+
+    def _signed_url(self, media_id, fresh=False):
+        mid = str(media_id)
+        with self._lock:
+            hit = self._dl_urls.get(mid)
+            if hit and not fresh and time.time() - hit[1] < self._URL_TTL:
+                return hit[0]
+        url = self.download_url(mid)
+        with self._lock:
+            if len(self._dl_urls) > 2000:
+                self._dl_urls.clear()
+            self._dl_urls[mid] = (url, time.time())
+        return url
+
+    def open_media(self, media_id, start=None, end=None, timeout=600):
+        """Stream a media item, or only bytes start..end (inclusive) of it.
+        O2 honours absolute ranges (206) but mishandles suffix ranges
+        ("bytes=-N" returns the *start*), so callers pass absolute offsets.
+        Returns a Stream with .status (200/206), .headers and .read()."""
+        hdr = {}
+        if start is not None:
+            hdr["Range"] = f"bytes={int(start)}-" + ("" if end is None else str(int(end)))
+        for attempt in (0, 1):
+            url = self._signed_url(media_id, fresh=attempt > 0)
+            status, hdrs, st = self._send("GET", url, None, self._headers(hdr),
+                                          timeout, stream=True)
+            if status in (200, 206):
+                return st
+            st.read()                    # drain the error body, keep the socket
+            st.close()
+            if attempt == 0 and status in (401, 403, 404, 410):
+                log.debug("download %s: HTTP %s with a cached url; asking a new one",
+                          media_id, status)
+                continue
+            if status in (401, 403):
+                raise SessionExpired(f"download {media_id}: HTTP {status}",
+                                     status=status)
+            raise SapiError(f"download {media_id} -> HTTP {status}", status=status)
+        raise SapiError(f"download {media_id}: no url")  # not reached
 
     def download(self, item):
         url = first(item, "url", "downloadurl", "downloadUrl")
@@ -555,8 +784,8 @@ class FunambolClient:
             raise SapiError("no download url for media item")
         if url.startswith("/"):
             url = self.base + url
-        req = urllib.request.Request(url, headers=self._headers())
-        resp = self._opener.open(req, timeout=self.timeout)
-        self._absorb_refreshed_token(resp)
-        return resp.read(), resp.headers.get("Content-Type",
-                                             "application/octet-stream")
+        status, hdrs, body = self._send("GET", url, None, self._headers(),
+                                        self.timeout)
+        if status >= 400:
+            raise SapiError(f"download -> HTTP {status}", status=status)
+        return body, hdrs.get("Content-Type", "application/octet-stream")
