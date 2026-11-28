@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"strconv"
@@ -242,6 +244,10 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, live *Live, a
 		http.NotFound(w, r)
 		return true
 	}
+	if ce := live.Store.Cache.Get(p); ce != nil {
+		s.serveCached(w, r, acc, p, ce)
+		return true
+	}
 	in, err := live.Store.Stat(r.Context(), p)
 	if err != nil {
 		s.fail(w, acc, err)
@@ -328,6 +334,56 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, live *Live, a
 		panic(http.ErrAbortHandler)
 	}
 	return true
+}
+
+// serveCached answers GET/HEAD of a file uploaded moments ago from the write
+// cache (memory or disk), so the client does not wait for O2 to process it.
+func (s *Server) serveCached(w http.ResponseWriter, r *http.Request, acc *config.Account, p string, ce *store.CacheEntry) {
+	start, end, isRange, bad := parseRange(r.Header.Get("Range"), ce.Size)
+	if bad {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", ce.Size))
+		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	length := ce.Size
+	if isRange {
+		length = end - start + 1
+	}
+	var src io.Reader
+	if r.Method != http.MethodHead && length > 0 {
+		if ce.Data != nil {
+			src = bytes.NewReader(ce.Data[start : start+length])
+		} else {
+			f, err := os.Open(ce.File)
+			if err != nil { // expired meanwhile: let O2 answer
+				http.Error(w, "la copia local caducó; reintenta", http.StatusServiceUnavailable)
+				return
+			}
+			defer f.Close()
+			src = io.NewSectionReader(f, start, length)
+		}
+	}
+	h := w.Header()
+	ct := mime.TypeByExtension(strings.ToLower(path.Ext(p)))
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	h.Set("Content-Type", ct)
+	h.Set("Accept-Ranges", "bytes")
+	h.Set("Last-Modified", httpDate(ce.Mod))
+	if ce.ETag != "" {
+		h.Set("ETag", `"`+strings.ReplaceAll(ce.ETag, `"`, "")+`"`)
+	}
+	h.Set("Content-Length", strconv.FormatInt(length, 10))
+	if isRange {
+		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, ce.Size))
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	if src != nil {
+		_, _ = io.CopyBuffer(w, src, make([]byte, 256<<10))
+	}
 }
 
 type countWriter struct {

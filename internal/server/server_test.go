@@ -269,3 +269,38 @@ func TestReadWaitsForValidation(t *testing.T) {
 		t.Fatal("lectura justo después de subir")
 	}
 }
+
+func TestCacheServesRightAfterUpload(t *testing.T) {
+	e := setup(t, nil) // accounts get cache_seconds = 15
+	e.o2.ValidateFor = 3 * time.Second
+	data := rnd(200_000)
+	e.expect(201, "PUT", "/c.bin", data)
+	before := e.o2.Calls["download"]
+	t0 := time.Now()
+	if got := e.expect(206, "GET", "/c.bin", nil, "Range", "bytes=-50"); !bytes.Equal(got, data[len(data)-50:]) {
+		t.Fatal("rango desde la caché")
+	}
+	if got := e.expect(200, "GET", "/c.bin", nil); !bytes.Equal(got, data) {
+		t.Fatal("GET desde la caché")
+	}
+	if el := time.Since(t0); el > time.Second || e.o2.Calls["download"] != before {
+		t.Fatalf("no se sirvió desde la caché (%s, descargas %d->%d)", el, before, e.o2.Calls["download"])
+	}
+	if b := string(e.expect(200, "GET", "/_admin/cache.json", nil)); !strings.Contains(b, "c.bin") {
+		t.Fatalf("cache.json: %s", b)
+	}
+}
+
+func TestNoCacheWaitsForValidation(t *testing.T) {
+	e := setup(t, func(c *config.Config) { c.Accounts[0].CacheSeconds = 0 })
+	e.o2.ValidateFor = 2 * time.Second
+	data := rnd(1000)
+	e.expect(201, "PUT", "/n.bin", data)
+	t0 := time.Now()
+	if got := e.expect(200, "GET", "/n.bin", nil); !bytes.Equal(got, data) {
+		t.Fatal("GET")
+	}
+	if el := time.Since(t0); el < time.Second {
+		t.Fatalf("sin caché debería esperar a la validación (%s)", el)
+	}
+}

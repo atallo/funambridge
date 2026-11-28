@@ -83,10 +83,13 @@ admite la sesión web):
 - los ficheros de más de 4 GB (máximo de O2) se rechazan con `413` antes de
   recibirlos.
 
-**Saber cuándo un fichero está listo**: tras subir, O2 lo valida unos segundos
-en segundo plano. El proxy lo sigue con `get-validation-status` (como la app) y
-una lectura de un fichero aún en validación **espera** a que termine, en vez de
-servir una copia local. Los listados lo muestran desde el primer momento.
+**Recién subido**: tras subir, O2 procesa el fichero unos segundos (hasta ~30)
+antes de poder descargarse. Durante `cache_seconds` (por cuenta, 15 por defecto;
+se cambia en el panel) las lecturas de lo recién subido se sirven desde una
+**copia local** (caché de escritura: hasta 256 MB en memoria, el resto en
+`cache_dir`), sin esperar. Pasado ese tiempo, si O2 aún no ha terminado, la
+lectura **espera** a que acabe (el proxy lo sigue con `get-validation-status`,
+como la app). Los listados lo muestran desde el primer momento.
 
 **WebDAV completo** (`golang.org/x/net/webdav`):
 
@@ -109,7 +112,9 @@ fichero por tamaño o contenido.
 
 **Conexión con O2**: huella TLS de **Chrome** (uTLS) con HTTP/1.1, conexiones
 reutilizadas, y en Linux las conexiones muertas se detectan en 60 s
-(`TCP_USER_TIMEOUT`). O2 está detrás de CloudFront, que mira la huella TLS.
+(`TCP_USER_TIMEOUT`). Una descarga que pasa 60 s sin recibir nada de O2 se corta
+(el cliente reintenta) y las llamadas pequeñas al API tienen un límite de 2 min.
+O2 está detrás de CloudFront, que mira la huella TLS.
 
 **Sesión**: la *validation key* que rota O2 se adopta sola; cada
 `keepalive_minutes` (5) hay una petición ligera para que O2 no cierre la sesión
@@ -126,6 +131,8 @@ cola».
   explorador de O2 (prueba las credenciales) con cuota y límites.
 - **Transferencias** en curso: progreso, velocidad, fase (recibiendo, subiendo,
   reintento, validando, en cola…) y las últimas terminadas.
+- **Caché de escritura**: qué ficheros recién subidos se sirven desde la copia
+  local y cuándo caducan; los segundos se ajustan por cuenta.
 - **Registro en vivo** (INFO y superior; el log completo con DEBUG va a
   `log_file`).
 - **Ajustes**: paralelismo, keepalive y avisos de **Telegram** (crea un bot con

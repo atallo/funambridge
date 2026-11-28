@@ -325,6 +325,12 @@ SMS), siempre que `X-deviceid` sea el dispositivo de la sesión ✔ (28‑nov‑
 Las respuestas de subida **no van envueltas en `data`**: los campos están en el
 primer nivel ✔. El `etag` no es el MD5 (ni en hex ni en base64) ✔.
 
+Un fichero **registrado sin contenido es invisible** ✔ (28‑nov‑2026): no sale al
+listar la carpeta ni pidiéndolo por su id. Si se pierde la respuesta del paso 1
+y se registra otra vez el mismo nombre, el registro huérfano no estorba: el
+nuevo conserva el nombre (no pasa a `nombre (1)`) y el huérfano, que nunca
+recibe contenido, no aparece. Por eso el paso 1 se puede reintentar.
+
 #### b) El de la web, en una petición *multipart* ✔
 
 ```
@@ -397,7 +403,7 @@ Versión 1.x (Go):
 |---|---|
 | `PROPFIND` | carpetas: `folder?action=get` (el árbol entero en una llamada, cacheado 3 min y releído si falta algo); ficheros: `media?action=get&folderid=…` (una vez por carpeta, luego índice en memoria); cuota: `get-storage-space` (caché de 60 s) |
 | `HEAD` | solo el índice, sin llamar a O2 |
-| `GET` (con o sin `Range`) | si el fichero aún se valida, espera (`get-validation-status`); `media?action=get` (URL, caché de 20 min) + `GET <url>` con `Range` absoluto, en streaming |
+| `GET` (con o sin `Range`) | lo recién subido, desde la caché de escritura durante `cache_seconds`; si no, y el fichero aún se valida, espera (`get-validation-status`); `media?action=get` (URL, caché de 20 min) + `GET <url>` con `Range` absoluto, en streaming (se corta si O2 pasa 60 s sin enviar nada) |
 | `PUT` | protocolo a) de 5.5: sobrescribe con `"id"` el fichero existente, reanuda cortes (hasta 8 intentos), retira el fichero a medias si falla; borra copias de más con el mismo nombre; sigue la validación |
 | `MOVE` | ficheros: `save-metadata` con `id` + `name`/`folderid`; carpetas: `folder?action=save` con `id` |
 | `COPY` | ficheros: `media/file?action=copy` |
@@ -409,8 +415,8 @@ Versión 1.x (Go):
 Transporte: uTLS con la huella de Chrome y HTTP/1.1, conexiones reutilizadas
 (las subidas, sin reutilizar), `TCP_USER_TIMEOUT` de 60 s en Linux.
 
-La 0.2.x (Python) usaba la subida multipart (b), borraba antes de subir y
-servía lo recién subido desde una caché local durante `cache_seconds`.
+La 0.2.x (Python) usaba la subida multipart (b) y borraba antes de subir; la
+caché de escritura es la misma idea.
 
 ## 8. Historial de cambios de O2
 

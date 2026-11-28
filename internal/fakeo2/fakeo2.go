@@ -50,6 +50,7 @@ type Server struct {
 	activeUploads int
 	MaxConcurrent int
 	UploadDelay   time.Duration
+	StallAfter    int64 // downloads stop sending after this many bytes (0 = off)
 }
 
 func New() *Server {
@@ -421,6 +422,18 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(data[a : b+1])
 		return
 	}
+	s.Mu.Lock()
+	stall := s.StallAfter
+	s.Mu.Unlock()
 	w.WriteHeader(200)
+	if stall > 0 && stall < int64(len(data)) {
+		_, _ = w.Write(data[:stall])
+		w.(http.Flusher).Flush()
+		select { // O2 "goes quiet" with the connection still open
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+		return
+	}
 	_, _ = w.Write(data)
 }

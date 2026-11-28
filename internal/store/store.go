@@ -54,6 +54,7 @@ type Store struct {
 	Account string
 	Tr      *transfers.Tracker
 	Spool   string // dir for PUT bodies
+	Cache   *Cache // write cache (nil / ttl 0 = off)
 
 	treeMu sync.Mutex
 	tree   *tree
@@ -72,8 +73,8 @@ type Store struct {
 	qAt   time.Time
 }
 
-func New(c *sapi.Client, account string, tr *transfers.Tracker, spool string) *Store {
-	return &Store{C: c, Account: account, Tr: tr, Spool: spool,
+func New(c *sapi.Client, account string, tr *transfers.Tracker, spool string, cache *Cache) *Store {
+	return &Store{C: c, Account: account, Tr: tr, Spool: spool, Cache: cache,
 		idx: map[string]map[string]*Entry{}, idxAt: map[string]time.Time{}, settling: map[string]chan struct{}{}}
 }
 
@@ -476,6 +477,7 @@ func (s *Store) Put(ctx context.Context, p string, sp *Spool, mod time.Time, t *
 	mu := s.putLock(fid, name)
 	mu.Lock()
 	defer mu.Unlock()
+	s.Cache.Drop(strings.Join(parts, "/")) // never serve the previous version
 	old, err := s.lookupForWrite(ctx, fid, name)
 	if err != nil {
 		return nil, err
@@ -525,6 +527,7 @@ func (s *Store) Put(ctx context.Context, p string, sp *Spool, mod time.Time, t *
 	}
 	e := &Entry{ID: res.ID, Name: name, Size: sp.Size(), Modified: m, Created: created, ETag: res.ETag}
 	s.setEntry(fid, e)
+	s.Cache.Put(strings.Join(parts, "/"), sp, res.ETag, m, res.ID)
 	t.SetPhase("validando")
 	s.Settle(res.ID, fid, p)
 	s.qMu.Lock()
@@ -569,6 +572,7 @@ func (s *Store) Delete(ctx context.Context, p string) error {
 	if in == nil {
 		return ErrNotFound
 	}
+	s.Cache.Drop(strings.Join(split(p), "/"))
 	if in.Dir {
 		if len(split(p)) == 0 {
 			return errors.New("no se borra la raíz")
@@ -642,6 +646,8 @@ func (s *Store) Rename(ctx context.Context, from, to string) error {
 	if len(tp) == 0 {
 		return errors.New("destino no válido")
 	}
+	s.Cache.Drop(strings.Join(split(from), "/"))
+	s.Cache.Drop(strings.Join(tp, "/"))
 	newName := tp[len(tp)-1]
 	dstParent, err := s.Dir(ctx, strings.Join(tp[:len(tp)-1], "/"), false)
 	if err != nil {
@@ -756,6 +762,22 @@ func (sp *Spool) OpenAt(off int64) (io.Reader, error) {
 		return bytes.NewReader(sp.buf[off:]), nil
 	}
 	return io.NewSectionReader(sp.f, off, sp.size-off), nil
+}
+
+// adopt moves the spool's temp file to dst (the cache takes it over).
+func (sp *Spool) adopt(dst string) bool {
+	if sp.f == nil {
+		return false
+	}
+	name := sp.f.Name()
+	sp.f.Close()
+	if err := os.Rename(name, dst); err != nil {
+		os.Remove(name)
+		sp.f = nil
+		return false
+	}
+	sp.f = nil
+	return true
 }
 
 func (sp *Spool) Close() {

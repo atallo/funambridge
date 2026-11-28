@@ -136,6 +136,11 @@ func (c *Client) uploadKind(ctx context.Context, u UploadReq, kind string) (*Upl
 	}
 
 	phase("registrando")
+	// Retrying save-metadata is safe even for a NEW file whose answer got
+	// lost (tested live, 28-nov-2026): an item registered without content is
+	// invisible (not listed, not returned by id), never receives content
+	// because we never learnt its id, and does not make O2 rename the next
+	// registration of that name to "name (1)".
 	var id string
 	for attempt := 0; ; attempt++ {
 		r, err := c.Do(ctx, Req{Method: "POST", Retry: true,

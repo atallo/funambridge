@@ -129,7 +129,7 @@ function fbDate(v){v=Number(v||0);if(!v)return '';if(v<1e11)v*=1000;return new D
  <div class="card">
   <h2>Cuentas</h2>
   <table>
-   <thead><tr><th>Cuenta</th><th>Acceso WebDAV</th><th>Sesión</th><th>Acciones</th></tr></thead>
+   <thead><tr><th>Cuenta</th><th>Acceso WebDAV</th><th>Caché</th><th>Sesión</th><th>Acciones</th></tr></thead>
    <tbody>
    {{range .Accounts}}
     <tr>
@@ -144,6 +144,12 @@ function fbDate(v){v=Number(v||0);if(!v)return '';if(v<1e11)v*=1000;return new D
          <input name="access_key" placeholder="usuario"><input name="secret_key" placeholder="contraseña"><button class="pri">Fijar</button></form>
        </div>
       </details>
+     </td>
+     <td>
+      <form method="post" action="/_admin/cache" style="display:flex;gap:5px;align-items:center">
+       <input type="hidden" name="name" value="{{.Name}}">
+       <input name="seconds" type="number" min="0" value="{{.Cache}}" style="width:64px" title="segundos que se sirve desde una copia local lo recién subido (0 = desactivada)">
+       <span class="muted small">s</span><button class="ghost" title="guardar">✓</button></form>
      </td>
      <td>
       {{if .HasAuth}}<span class="tag ok">sesión</span>{{else}}<span class="tag bad">sin sesión</span>{{end}}
@@ -183,7 +189,7 @@ function fbDate(v){v=Number(v||0);if(!v)return '';if(v<1e11)v*=1000;return new D
      </td>
     </tr>
    {{else}}
-    <tr><td colspan="4" class="muted" style="text-align:center;padding:24px">No hay cuentas todavía. Pulsa «Añadir cuenta nueva».</td></tr>
+    <tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No hay cuentas todavía. Pulsa «Añadir cuenta nueva».</td></tr>
    {{end}}
    </tbody>
   </table>
@@ -286,6 +292,24 @@ function fbDate(v){v=Number(v||0);if(!v)return '';if(v<1e11)v*=1000;return new D
   function fbExOpen(name){document.getElementById('fb-ex-acc').value=name;document.getElementById('fb-ex').scrollIntoView({behavior:'smooth'});fbExLoad('');}
  </script>
  {{end}}
+
+ <div class="card">
+  <details id="fb-cache" ontoggle="if(this.open)fbCachePoll()">
+   <summary class="h2">Caché de escritura <span class="badge" id="cache-count">0</span></summary>
+   <p class="muted small" style="margin:0 0 8px">Lo recién subido se sirve desde aquí durante los segundos de «Caché» de cada cuenta, mientras O2 lo procesa. Pasado ese tiempo, una lectura espera a que O2 termine.</p>
+   <table class="tx"><thead><tr><th>Cuenta</th><th>Fichero</th><th>Tamaño</th><th>Dónde</th><th>Caduca</th></tr></thead><tbody id="cache-rows"></tbody></table>
+  </details>
+ </div>
+ <script>
+ (function(){
+  function render(d){document.getElementById('cache-count').textContent=d.length;
+   document.getElementById('cache-rows').innerHTML=d.length?d.map(function(e){return '<tr><td>'+fbEsc(e.account)+'</td><td class="mono small">'+fbEsc(e.path)+
+    '</td><td>'+fbHuman(e.size)+'</td><td>'+e.where+'</td><td>'+e.expires+' s</td></tr>';}).join(''):
+    "<tr><td colspan='5' class='muted' style='text-align:center;padding:14px'>La caché está vacía.</td></tr>";}
+  window.fbCachePoll=function(){if(document.hidden)return;fetch('/_admin/cache.json').then(function(r){return r.json();}).then(render).catch(function(){});};
+  fbCachePoll();setInterval(function(){if(document.getElementById('fb-cache').open)fbCachePoll();},3000);
+ })();
+ </script>
 
  <div class="card">
   <details id="fb-log" ontoggle="if(this.open)fbLogPoll()">

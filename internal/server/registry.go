@@ -67,11 +67,18 @@ func NewRegistry(cfg *config.Config) *Registry {
 	return r
 }
 
-func (r *Registry) spoolDir() string {
+// baseDir holds the PUT spool and the write cache ("cache_dir", else the
+// system temp dir).
+func (r *Registry) baseDir() string {
 	d := r.Cfg.CacheDir
 	if d == "" {
-		d = filepath.Join(os.TempDir(), "funambridge-spool")
+		d = filepath.Join(os.TempDir(), "funambridge-cache")
 	}
+	return d
+}
+
+func (r *Registry) spoolDir() string {
+	d := filepath.Join(r.baseDir(), "spool")
 	_ = os.MkdirAll(d, 0o700)
 	return d
 }
@@ -90,7 +97,8 @@ func (r *Registry) For(a *config.Account) *Live {
 		return l
 	}
 	c := sapi.New(a.BaseURL, a.DeviceID, &a.Session, func() { go r.save() })
-	st := store.New(c, a.Name, r.Tr, r.spoolDir())
+	cache := store.NewCache(a.CacheSeconds, filepath.Join(r.baseDir(), a.AccessKey))
+	st := store.New(c, a.Name, r.Tr, r.spoolDir(), cache)
 	l := &Live{Acc: a, Store: st, FS: davfs.New(st), locks: webdav.NewMemLS(),
 		dav: map[string]*webdav.Handler{}}
 	r.live[a.AccessKey] = l
@@ -114,8 +122,27 @@ func (l *Live) handler(prefix string) *webdav.Handler {
 // Drop forgets the runtime of an account (after its session or keys changed).
 func (r *Registry) Drop(accessKey string) {
 	r.mu.Lock()
+	l := r.live[accessKey]
 	delete(r.live, accessKey)
 	r.mu.Unlock()
+	if l != nil {
+		l.Store.Cache.Close() // stop its sweeper, remove its files
+	}
+}
+
+// CacheOverview lists the write-cache entries of every live account.
+func (r *Registry) CacheOverview() []store.CacheView {
+	r.mu.Lock()
+	lives := make([]*Live, 0, len(r.live))
+	for _, l := range r.live {
+		lives = append(lives, l)
+	}
+	r.mu.Unlock()
+	out := []store.CacheView{}
+	for _, l := range lives {
+		out = append(out, l.Store.Cache.Snapshot(l.Acc.Name)...)
+	}
+	return out
 }
 
 // ---- keepalive ---------------------------------------------------------------

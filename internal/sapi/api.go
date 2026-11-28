@@ -462,13 +462,14 @@ func (c *Client) Open(ctx context.Context, id string, start, end int64) (io.Read
 			}
 			return nil, err
 		}
+		body := withIdleTimeout(r.Stream, DownloadIdle)
 		if r.Status == http.StatusOK && start > 0 {
-			if _, err := io.CopyN(io.Discard, r.Stream, start); err != nil {
-				r.Stream.Close()
+			if _, err := io.CopyN(io.Discard, body, start); err != nil {
+				body.Close()
 				return nil, &Error{Op: "download " + id, Kind: KindTransient, Err: err}
 			}
 		}
-		return r.Stream, nil
+		return body, nil
 	}
 	return nil, &Error{Op: "download " + id, Kind: KindTransient}
 }

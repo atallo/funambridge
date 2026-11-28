@@ -40,6 +40,7 @@ type accView struct {
 	ReadOnly  bool
 	AliveOK   string
 	AliveFail string
+	Cache     int
 }
 
 type pageData struct {
@@ -70,6 +71,8 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 		s.browse(w, r)
 	case "/transfers.json":
 		writeJSON(w, s.R.Tr.Snapshot())
+	case "/cache.json":
+		writeJSON(w, s.R.CacheOverview())
 	case "/logs.json":
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		writeJSON(w, logx.Since(after))
@@ -101,7 +104,7 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for i, a := range cfg.Accounts {
-		v := accView{I: i, Name: a.Name, Phone: a.Phone(), User: a.AccessKey, Pass: a.SecretKey,
+		v := accView{I: i, Name: a.Name, Phone: a.Phone(), User: a.AccessKey, Pass: a.SecretKey, Cache: a.CacheSeconds,
 			HasAuth: a.HasAuth(), ReadOnly: a.HasAuth() && !strings.HasPrefix(a.DeviceID, "web-")}
 		v.PhoneDig = strings.TrimPrefix(a.Phone(), "+34")
 		al := s.R.Alive(a)
@@ -341,6 +344,25 @@ func (s *Server) adminPost(w http.ResponseWriter, r *http.Request, p string) {
 		s.R.save()
 		s.R.Drop(old)
 		s.back(w, r, "Usuario y contraseña actualizados para '"+a.Name+"'", "")
+	case "/cache":
+		secs, err := strconv.Atoi(f("seconds"))
+		if err != nil || secs < 0 {
+			s.back(w, r, "", "valor no válido")
+			return
+		}
+		cfg.Lock()
+		a := cfg.ByName(f("name"))
+		if a != nil {
+			a.CacheSeconds = secs
+		}
+		cfg.Unlock()
+		if a == nil {
+			s.back(w, r, "", "cuenta no encontrada")
+			return
+		}
+		s.R.save()
+		s.R.Drop(a.AccessKey) // rebuild the store with the new TTL
+		s.back(w, r, "Caché de "+strconv.Itoa(secs)+" s en '"+a.Name+"'", "")
 	case "/settings":
 		up, _ := strconv.Atoi(f("max_uploads"))
 		down, _ := strconv.Atoi(f("max_downloads"))

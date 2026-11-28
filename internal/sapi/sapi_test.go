@@ -130,3 +130,22 @@ func TestFolderTooBig(t *testing.T) {
 		t.Fatalf("esperaba ErrFolderTooBig, %v", err)
 	}
 }
+
+func TestStalledDownloadIsCut(t *testing.T) {
+	f, c, _ := setup(t)
+	old := sapi.DownloadIdle
+	sapi.DownloadIdle = 300 * time.Millisecond
+	defer func() { sapi.DownloadIdle = old }()
+	id := f.Put("1", "a.bin", rnd(100_000), 1)
+	f.StallAfter = 10_000
+	rc, err := c.Open(context.Background(), id, 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	start := time.Now()
+	n, err := io.Copy(io.Discard, rc)
+	if err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("la descarga parada no se cortó: %d B, err=%v, %s", n, err, time.Since(start))
+	}
+}
