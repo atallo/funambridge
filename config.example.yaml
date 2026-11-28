@@ -1,6 +1,7 @@
 # Ejemplo de configuración de funambridge.
 # El fichero real es config.yaml (excluido de git). Normalmente se gestiona
 # desde el panel web, no a mano. En Docker, móntalo en /data/config.yaml.
+# Lee tal cual los config.yaml de las versiones 0.x (Python).
 
 server:
   host: 0.0.0.0       # un único puerto: WebDAV + panel web.
@@ -9,31 +10,41 @@ server:
 admin:
   enabled: true       # pon false para deshabilitar el panel /_admin.
 
+# Log extendido (DEBUG, rotado 5 MB x 3). "" = solo consola.
+log_file: ""          # p.ej. /data/funambridge.log
+
 # TLS integrado opcional, para clientes WebDAV que exigen HTTPS sin un proxy
 # TLS delante. Si das cert+key y no existen, se generan autofirmados (en el
-# cliente, marca "aceptar certificado no fiable"). Déjalo vacío si terminas TLS
-# en tu propio proxy HTTPS.
+# cliente, marca "aceptar certificado no fiable").
 tls:
   cert: ""    # p.ej. /data/funambridge-cert.pem
   key: ""     # p.ej. /data/funambridge-key.pem
 
-# La caché de escritura guarda en memoria hasta 256 MB de contenido; lo que no
-# cabe se vuelca a disco aquí (un fichero por entrada) y se sirve en streaming.
-# "" = directorio temporal del sistema. En Docker conviene un subdir del volumen.
-cache_dir: ""   # p.ej. /data/cache
+# Dónde se guarda el cuerpo de cada PUT mientras se sube a O2 (permite reanudar
+# una subida cortada sin pedírsela otra vez al cliente). Hasta 16 MB va en
+# memoria; el resto, aquí. "" = directorio temporal del sistema.
+cache_dir: ""   # p.ej. /data/spool
 
 # O2 cierra la sesión web tras ~1-2 h sin peticiones (desde nov. 2026). El
-# proxy hace una petición ligera por cuenta cada N minutos para mantenerla
-# viva entre copia y copia. 0 = desactivado.
+# proxy hace una petición ligera por cuenta cada N minutos. 0 = desactivado.
 keepalive_minutes: 5
+
+# Transferencias simultáneas contra O2. 0 = sin límite (por defecto).
+transfers:
+  max_uploads: 0
+  max_downloads: 0
+
+# Avisos por Telegram (sesión caducada, errores). Vacío = desactivado.
+telegram:
+  bot_token: ""
+  chat_id: ""
 
 accounts:
   - name: personal
     base_url: https://cloud.o2online.es
     access_key: O2XXXXXXXXXXXXXXXXXX      # usuario WebDAV (regenerar/fijar desde el panel)
     secret_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   # contraseña WebDAV
-    device_id: funambridge-xxxxxxxxxxxx
-    cache_seconds: 15                      # caché tras subir (segundos; 0 = off)
+    device_id: web-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx         # dispositivo de la sesión de O2
     # Se rellena al iniciar sesión (SMS desde el panel, HAR o cookies).
     oauth: {accesstoken: "", refreshtoken: "", platform: web, expiresin: "",
             lastrefreshdate: 0, msisdn: "", captured_at: ""}

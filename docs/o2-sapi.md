@@ -29,7 +29,9 @@ Todo va detrás de **CloudFront**, que mira la "huella" del *handshake* TLS.
 Con un contexto TLS sin ALPN (`ssl.create_default_context()` de Python en
 Linux), CloudFront responde **401 con cuerpo vacío** a todo. Con el contexto de
 `urllib` (ALPN `http/1.1` y *post-handshake auth*) funciona ✔. Desde Windows,
-ambos funcionaban.
+ambos funcionaban. La versión 1.x (Go) presenta el ClientHello de **Chrome**
+(uTLS) con ALPN reducido a `http/1.1` ✔: con el ALPN de Chrome tal cual
+(`h2,http/1.1`) CloudFront negocia HTTP/2.
 
 ## 2. Sesión y autenticación
 
@@ -272,54 +274,105 @@ vacía ✔.
 En bytes. Lo que hay en la papelera (`softdeleted`) **no** cuenta en `used`, y
 `free` = `quota` − `used`.
 
-### 5.5 Subir un fichero ✔ (desde ~19‑nov‑2026)
+### 5.5 Subir un fichero
 
-Una sola petición *multipart* al host de subidas:
+Hay dos protocolos y **los dos funcionan con la sesión web** (la del login por
+SMS), siempre que `X-deviceid` sea el dispositivo de la sesión ✔ (28‑nov‑2026).
+
+#### a) El de la app de Windows, en dos pasos (lo usa la 1.x) ✔
+
+1. **Registrar** el fichero (en el host web):
+
+   ```
+   POST /sapi/upload/<tipo>?action=save-metadata&responsetime=true&lastupdate=true
+   Content-Type: application/octet-stream
+   {"data":{"contenttype":"application/octet-stream","creationdate":"20261128T130000Z",
+            "modificationdate":"20261128T130000Z","folderid":<id>,"name":"f.bin","size":<bytes>}}
+   ```
+
+   → `{"success":"Media metadata saved successfully","id":"<id>","lastupdate":…}`.
+   `<tipo>` es `file`, `picture`, `video` o `audio` (según la extensión; un
+   contenido que no encaja da `MED-1050` y se puede subir como `file`). Las
+   fechas van como `AAAAMMDDTHHMMSSZ`.
+   **Con `"id": "<id existente>"` sobrescribe ese fichero conservando su id** ✔:
+   así nunca aparece `nombre (1).ext`. Con `"id"` y solo `name`/`folderid`,
+   **renombra o mueve** sin volver a subir ✔.
+2. **Enviar el contenido** (host de subidas), el fichero en bruto:
+
+   ```
+   POST https://upload.cloud.o2online.es/sapi/upload/<tipo>?action=save&lastupdate=true&acceptasynchronous=true
+   Content-Type: application/octet-stream
+   x-funambol-id: <id>
+   x-funambol-file-size: <bytes>
+   ```
+
+   → `{"success":"Media uploaded successfully","id","lastupdate","status":"V","etag"}`.
+   Funciona también con 0 bytes ✔ (fichero nuevo; ↗ sobrescribir con 0 bytes da
+   `MED-1049` y el original se pierde: hay que borrar y crear).
+3. **Reanudar** si el envío se corta ✔: preguntar cuánto tiene O2
+
+   ```
+   GET /sapi/upload/<tipo>?action=save&lastupdate=true&acceptasynchronous=true   (host web)
+   content-range: bytes */<total>
+   x-funambol-id: <id>
+   x-funambol-file-size: <total>
+   ```
+
+   → `308` + `Range: 0-<último byte recibido>` (el cuerpo trae HTML; se ignora),
+   o `200` con `etag`/`status` si ya lo tenía completo. Después se envía solo el
+   resto, igual que en el paso 2, con `content-range: bytes <desde>-<total-1>/<total>`.
+
+Las respuestas de subida **no van envueltas en `data`**: los campos están en el
+primer nivel ✔. El `etag` no es el MD5 (ni en hex ni en base64) ✔.
+
+#### b) El de la web, en una petición *multipart* ✔
 
 ```
 POST https://upload.cloud.o2online.es/sapi/upload?action=save&validationkey=…
-X-deviceid: <el de la sesión>          ← obligatorio
 Content-Type: multipart/form-data; boundary=…
-Content-Length: <total>
 
---…
-Content-Disposition: form-data; name="data"
-
-{"data":{"name":"fichero.ext","size":<bytes>,"modificationdate":"","folderid":<id numérico>}}
---…
-Content-Disposition: form-data; name="file"; filename="fichero.ext"
-Content-Type: application/octet-stream
-
-<bytes>
---…--
+parte "data": {"data":{"name":"f.bin","size":<bytes>,"modificationdate":"","folderid":<id>}}
+parte "file": los bytes (application/octet-stream)
 ```
 
-→ `{"success": "…", "id": "<id>", "status": "V", "etag": "…", "type": "…"}`.
+→ `{"success","id","status":"V","etag","type"}`. No sobrescribe ni se reanuda.
 
-- `status: "V"` = validando. **O2 procesa el fichero en segundo plano**: tarda
-  de unos segundos a ~30 s en aparecer en los listados y en poder descargarse.
-  funambridge tapa ese hueco con su caché de escritura.
-- **O2 nunca sobrescribe**: si ya existe un fichero con ese nombre en la
-  carpeta, guarda el nuevo como `nombre (1).ext`, `nombre (2).ext`… Para
-  "sobrescribir" hay que borrar antes el anterior.
+#### Después de subir
+
+- `status: "V"` = validando. **O2 procesa el fichero en segundo plano** (unos
+  segundos; hasta ~30 s): mientras tanto puede no aparecer en los listados ni
+  descargarse (↗ `COM-1005`). Cuándo termina se sabe con:
+
+  ```
+  POST /sapi/media?action=get-validation-status
+  {"data":{"ids":[{"id":<id>,"folder_id":<carpeta>}]}}
+  ```
+
+  → `{"data":{"ids":[{"id":<id>,"status":"V"}]}}` mientras valida; después otra
+  letra (`U` en las pruebas, a los ~6 s) ✔. Un id que O2 ya no conoce no
+  aparece en la lista.
+- **O2 nunca sobrescribe por nombre**: si se crea (sin `"id"`) un fichero con un
+  nombre que ya existe, guarda el nuevo como `nombre (1).ext`…
 - Si la conexión se corta **después** de enviar los bytes, O2 puede haber
-  guardado el fichero igualmente. Si el cliente reintenta, quedan duplicados
-  (con el mismo nombre o como `(N)`). funambridge, tras una subida fallida,
-  busca y borra esas copias.
-- Tras enviar el último byte, O2 puede tardar en responder en ficheros grandes.
-  funambridge espera 120 s + 1 s por MB.
-- El tamaño máximo es `sapi.upload.max-size-in-mb` (4 GB). ↗ Por encima, error
-  `MED-1020`.
+  guardado el fichero igualmente; con el protocolo a) se ve con la consulta de
+  reanudación.
+- Tras enviar el último byte, O2 puede tardar minutos en responder en ficheros
+  grandes (↗ 87 s con 153 MB).
+- Tamaño máximo: `sapi.upload.max-size-in-mb` (4 GB). ↗ Por encima, `MED-1020`.
 
-**La subida antigua, en dos pasos** (`/sapi/upload/file?action=save-metadata`
-en `cloud.*` + `?action=save` en `upload.*`), da **401 vacío con sesiones web**
-desde ~19‑nov‑2026 ✔. ↗ La app de Windows la sigue usando con su sesión OAuth,
-y con ella se puede:
+### 5.6 Copiar en la nube ✔
 
-- sobrescribir un fichero conservando su id, enviando `"id"` en los metadatos;
-- reanudar una subida cortada (`GET … content-range: bytes */<total>` →
-  `308` + `Range: 0-N`, y enviar el resto);
-- consultar `media?action=get-validation-status`.
+```
+POST /sapi/media/file?action=copy
+{"data":{"id":<id>,"parentid":<carpeta destino>,"name":"copia.bin"}}
+```
+
+→ el id de la copia (en `data.id`, o dentro de `data.media`/`data.file`). Sin
+descargar ni volver a subir. La copia también pasa por validación.
+
+### 5.7 Renombrar o mover una carpeta ↗
+
+`POST /sapi/media/folder?action=save` con `{"data":{"id":<id>,"name":"…","parentid":<nuevo padre>}}`.
 
 ## 6. Códigos de error conocidos
 
@@ -338,22 +391,26 @@ y con ella se puede:
 
 ## 7. Cómo lo usa funambridge (WebDAV → SAPI)
 
+Versión 1.x (Go):
+
 | WebDAV | SAPI |
 |---|---|
-| `PROPFIND` carpeta | carpetas: `folder?action=get` (filtrado por `parentid`); ficheros: `media?action=get&folderid=…` (una vez por carpeta, luego índice en memoria); cuota: `get-storage-space` (caché de 60 s) |
+| `PROPFIND` | carpetas: `folder?action=get` (el árbol entero en una llamada, cacheado 3 min y releído si falta algo); ficheros: `media?action=get&folderid=…` (una vez por carpeta, luego índice en memoria); cuota: `get-storage-space` (caché de 60 s) |
 | `HEAD` | solo el índice, sin llamar a O2 |
-| `GET` (con o sin `Range`) | `media?action=get` (URL, caché de 20 min) + `GET <url>` con `Range` absoluto, reenviado en streaming |
-| `PUT` | borrar las copias con ese nombre (`media?action=softdelete`) + subida multipart (5.5) |
-| `DELETE` fichero | `media?action=softdelete` (todas las copias con ese nombre) |
-| `DELETE` carpeta | `folder?action=softdelete`; si da FOL-1036, vaciarla por partes |
+| `GET` (con o sin `Range`) | si el fichero aún se valida, espera (`get-validation-status`); `media?action=get` (URL, caché de 20 min) + `GET <url>` con `Range` absoluto, en streaming |
+| `PUT` | protocolo a) de 5.5: sobrescribe con `"id"` el fichero existente, reanuda cortes (hasta 8 intentos), retira el fichero a medias si falla; borra copias de más con el mismo nombre; sigue la validación |
+| `MOVE` | ficheros: `save-metadata` con `id` + `name`/`folderid`; carpetas: `folder?action=save` con `id` |
+| `COPY` | ficheros: `media/file?action=copy` |
+| `DELETE` | `media?action=softdelete` (todas las copias) / `folder?action=softdelete` (por partes si `FOL-1036`) |
 | `MKCOL` | `folder?action=save` |
 | *keepalive* | `profile?action=get` cada 5 min |
 | límites | `system/information` (caché de 6 h) |
 
-Transporte: conexiones persistentes, una por hilo y host, con el contexto TLS de
-`urllib`. Si O2 responde un 401/403 **vacío**, la petición se repite a la
-antigua (una conexión por petición) y, si así funciona, el proceso se queda en
-ese modo.
+Transporte: uTLS con la huella de Chrome y HTTP/1.1, conexiones reutilizadas
+(las subidas, sin reutilizar), `TCP_USER_TIMEOUT` de 60 s en Linux.
+
+La 0.2.x (Python) usaba la subida multipart (b), borraba antes de subir y
+servía lo recién subido desde una caché local durante `cache_seconds`.
 
 ## 8. Historial de cambios de O2
 
@@ -363,3 +420,4 @@ ese modo.
 | nov‑2026 | Login web por OAuth2 + PKCE en `t3.o2online.es`; sin cookie `PLC` | 0.1.9 (login por SMS) |
 | nov‑2026 | La sesión muere tras ~1–2 h sin peticiones | 0.1.11 (*keepalive*) |
 | nov‑2026 | CloudFront rechaza clientes TLS sin ALPN (visto desde Docker/Linux) | 0.2.1 |
+| 28‑nov‑2026 | Comprobado que la sesión web admite el protocolo de subida de la app de Windows (sobrescribir, reanudar, validación) | 1.0.0-beta.1 (Go) |

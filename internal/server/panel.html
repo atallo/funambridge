@@ -1,0 +1,334 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>funambridge</title>
+<style>
+ :root{--bg:#f5f6f8;--card:#fff;--bd:#e4e7eb;--fg:#1f2933;--muted:#6b7280;
+       --pri:#2563eb;--ok:#16a34a;--bad:#dc2626;--warn:#b45309}
+ *{box-sizing:border-box}
+ body{font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+ .wrap{max-width:1080px;margin:0 auto;padding:28px 18px 60px}
+ h1{font-size:22px;margin:0} .sub{color:var(--muted);margin:2px 0 18px}
+ .ver{font-size:13px;font-weight:400;color:var(--muted)}
+ .card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:18px 20px;margin:16px 0;box-shadow:0 1px 3px rgba(16,24,40,.05)}
+ .card>h2,.card>details>summary.h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+ table{width:100%;border-collapse:collapse}
+ th{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);text-align:left;padding:6px 10px;border-bottom:2px solid var(--bd)}
+ td{padding:11px 10px;border-bottom:1px solid var(--bd);vertical-align:top}
+ tr:last-child td{border-bottom:0}
+ .acc{font-weight:600} .muted{color:var(--muted)} .small{font-size:12px}
+ .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+ input,button,select{font:inherit}
+ input,select{padding:7px 9px;border:1px solid var(--bd);border-radius:8px;background:#fff}
+ input[readonly]{background:#f8fafc;color:#374151}
+ button{padding:7px 12px;border:1px solid var(--bd);border-radius:8px;background:#fff;cursor:pointer}
+ button:hover{background:#f1f3f5}
+ .ghost{padding:5px 9px;font-size:13px;color:#374151}
+ .danger{color:var(--bad);border-color:#f3c2c2} .danger:hover{background:#fdecec}
+ .pri{background:var(--pri);color:#fff;border-color:var(--pri);font-weight:600} .pri:hover{background:#1d4ed8}
+ .tag{font-size:12px;padding:3px 9px;border-radius:999px;display:inline-block}
+ .tag.ok{background:#e7f6ec;color:var(--ok)} .tag.bad{background:#fdecec;color:var(--bad)}
+ .keyrow{display:flex;gap:6px;align-items:center;margin:3px 0}
+ .keyrow input{flex:1;min-width:90px;font-size:13px}
+ .klbl{font-size:11px;color:var(--muted);width:66px}
+ .mt{margin-top:8px}
+ summary.link{color:var(--pri);cursor:pointer;font-size:13px;list-style:none;display:inline-flex;align-items:center;gap:6px;user-select:none}
+ summary.link::-webkit-details-marker,summary.h2::-webkit-details-marker{display:none}
+ summary.link::before,summary.h2::before{content:"▸";font-size:10px;transition:transform .15s}
+ details[open]>summary.link::before,details[open]>summary.h2::before{transform:rotate(90deg)}
+ summary.h2{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px}
+ .pop{margin-top:8px;padding:12px 13px;background:#f8fafc;border:1px solid var(--bd);border-radius:10px;display:flex;flex-direction:column;gap:12px;min-width:235px}
+ .pop form{display:flex;flex-direction:column;gap:6px;margin:0} .pop input{width:100%}
+ .pop .lbl{font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+ .badge{background:#eef1f4;color:#374151;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600;text-transform:none;letter-spacing:0}
+ .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ .card.pend{border:2px solid var(--pri);background:#f5f8ff}
+ .exstat{border-radius:8px;padding:5px 10px;line-height:1.4;display:inline-block}
+ .crumbs{margin-top:12px;font-size:13px} .crumbs a{color:var(--pri);text-decoration:none}
+ tr.exdir a{color:var(--fg);text-decoration:none;font-weight:500} tr.exdir a:hover{color:var(--pri)}
+ .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px} @media(max-width:680px){.grid{grid-template-columns:1fr}}
+ .kv{margin:4px 0} .kv b{display:inline-block;min-width:96px;color:var(--muted);font-weight:500}
+ code{background:#eef1f4;padding:2px 6px;border-radius:6px;font-size:13px}
+ .banner{padding:11px 14px;border-radius:10px;margin:14px 0}
+ .ok-b{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46} .err-b{background:#fef2f2;border:1px solid #fecaca;color:#991b1b}
+ details.add>summary{list-style:none} details.add>summary::-webkit-details-marker{display:none}
+ .addhead{display:inline-block;background:var(--pri);color:#fff;border-radius:9px;padding:9px 16px;font-weight:600;cursor:pointer}
+ .addbody{margin-top:14px} .addbody h3{font-size:14px;margin:18px 0 6px} .addbody ol{padding-left:20px;color:#374151}
+ .inline input{margin-right:6px} .note{color:var(--bad);font-size:13px}
+ .top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+ .o2link{display:inline-block;padding:8px 14px;border:1px solid var(--bd);border-radius:9px;background:#fff;color:var(--pri);text-decoration:none;font-weight:600;font-size:14px}
+ .acts{display:flex;flex-wrap:wrap;gap:6px;align-items:center} .acts form{margin:0}
+ dialog.dlg{border:0;border-radius:14px;padding:0;width:min(560px,92vw);color:var(--fg);box-shadow:0 24px 64px rgba(16,24,40,.28)}
+ dialog.dlg::backdrop{background:rgba(15,23,42,.45)}
+ .dlg header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--bd)}
+ .dlg header form{margin:0}
+ .dbody{padding:16px 18px 18px;display:flex;flex-direction:column;gap:14px}
+ .dbody section{border:1px solid var(--bd);border-radius:10px;padding:12px 14px} .dbody section.hl{border-color:var(--pri);background:#f5f8ff}
+ .dbody h4{margin:0 0 4px;font-size:14px;display:flex;align-items:center;gap:8px} .dbody p{margin:0 0 10px}
+ .drow{display:flex;gap:8px;flex-wrap:wrap;margin:0} .drow input{flex:1;min-width:180px}
+ .dcol{display:flex;flex-direction:column;gap:8px;margin:10px 0 0}
+ .prog{height:6px;background:#eef1f4;border-radius:99px;overflow:hidden;min-width:90px}
+ .prog i{display:block;height:100%;background:var(--pri)}
+ .tx td{padding:8px 10px;font-size:13px}
+ .logbox{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:10px 12px;height:340px;overflow:auto;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+ .logbox .w{color:#fbbf24} .logbox .e{color:#f87171} .logbox .t{color:#64748b}
+ .chk{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;cursor:pointer}
+ .num{width:80px}
+</style>
+<script>
+function o2copy(id){var t=document.getElementById(id);t.focus();t.select();
+ try{navigator.clipboard.writeText(t.value);}catch(e){try{document.execCommand('copy');}catch(_){}}}
+function fbEsc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function fbHuman(n){n=Number(n||0);var u=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return (i?n.toFixed(1):n)+' '+u[i];}
+function fbDate(v){v=Number(v||0);if(!v)return '';if(v<1e11)v*=1000;return new Date(v).toLocaleString();}
+</script></head><body>
+<div class="wrap">
+ <div class="top">
+  <div><h1>funambridge <span class="ver">v{{.Version}}</span></h1>
+   <p class="sub">Acceso a O2 Cloud por <b>WebDAV</b> (Hyper Backup, rclone, unidades de red…)</p></div>
+  <a class="o2link" href="{{.O2Web}}" target="_blank" rel="noopener" title="{{.O2Web}}">Abrir O2 Cloud ↗</a>
+ </div>
+ {{if .Msg}}<div class="banner ok-b">{{.Msg}}</div>{{end}}
+ {{if .Err}}<div class="banner err-b">{{.Err}}</div>{{end}}
+
+ {{with .Pending}}
+ <div class="card pend">
+  <h2>Código del SMS</h2>
+  <p style="margin:0 0 12px">O2 ha enviado un SMS al {{.Masked}} para iniciar sesión en la cuenta <b>{{.Name}}</b>. Escribe el código (caduca en unos minutos).</p>
+  <form method="post" action="/_admin/login-verify" class="bar">
+   <input type="hidden" name="token" value="{{.Token}}">
+   <input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="código" required autofocus style="width:130px;font-size:18px;letter-spacing:.15em">
+   <button class="pri">Validar e iniciar sesión</button>
+  </form>
+  <form method="post" action="/_admin/login-cancel" class="mt">
+   <input type="hidden" name="token" value="{{.Token}}"><button class="ghost">Cancelar</button>
+  </form>
+ </div>
+ {{end}}
+
+ <div class="card">
+  <h2>Conexión WebDAV</h2>
+  <div class="grid">
+   <div>
+    <div class="kv"><b>URL</b> <code id="cx-url"></code></div>
+    <div class="kv"><b>Usuario</b> el de la cuenta (abajo)</div>
+    <div class="kv"><b>Contraseña</b> la de la cuenta</div>
+   </div>
+   <div>
+    <div class="kv"><b>Hyper Backup</b> <span class="muted small">destino «WebDAV»</span></div>
+    <div class="kv"><b>Servidor</b> <code id="cx-host"></code></div>
+    <div class="kv"><b>Puerto</b> <code id="cx-port"></code></div>
+    <div class="kv"><b>HTTPS</b> <span id="cx-tls"></span></div>
+   </div>
+  </div>
+  <p class="muted small" style="margin:10px 0 0">Conexión con O2: huella TLS {{.Fingerprint}}.</p>
+ </div>
+ <script>(function(){var https=location.protocol==='https:',port=location.port||(https?'443':'80');
+  var set=function(i,v){var e=document.getElementById(i);if(e)e.textContent=v;};
+  set('cx-url',location.origin);set('cx-host',location.hostname);set('cx-port',port);set('cx-tls',https?'Sí':'No');})();</script>
+
+ <div class="card">
+  <h2>Cuentas</h2>
+  <table>
+   <thead><tr><th>Cuenta</th><th>Acceso WebDAV</th><th>Sesión</th><th>Acciones</th></tr></thead>
+   <tbody>
+   {{range .Accounts}}
+    <tr>
+     <td><div class="acc">{{.Name}}</div><div class="muted small">{{.Phone}}</div></td>
+     <td>
+      <div class="keyrow"><span class="klbl">Usuario</span><input id="ak{{.I}}" class="mono" readonly value="{{.User}}"><button type="button" class="ghost" onclick="o2copy('ak{{.I}}')">Copiar</button></div>
+      <div class="keyrow"><span class="klbl">Contraseña</span><input id="sk{{.I}}" class="mono" readonly value="{{.Pass}}"><button type="button" class="ghost" onclick="o2copy('sk{{.I}}')">Copiar</button></div>
+      <details class="mt"><summary class="link">Cambiar usuario / contraseña</summary>
+       <div class="pop">
+        <form method="post" action="/_admin/keys"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="mode" value="regen"><button>Regenerar aleatorios</button></form>
+        <form method="post" action="/_admin/keys"><span class="lbl">Fijar manualmente</span><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="mode" value="set">
+         <input name="access_key" placeholder="usuario"><input name="secret_key" placeholder="contraseña"><button class="pri">Fijar</button></form>
+       </div>
+      </details>
+     </td>
+     <td>
+      {{if .HasAuth}}<span class="tag ok">sesión</span>{{else}}<span class="tag bad">sin sesión</span>{{end}}
+      {{if .ReadOnly}}<div class="mt"><span class="tag bad" title="Esta sesión no es de este dispositivo: O2 rechazará las subidas.">solo lectura · renueva la sesión</span></div>{{end}}
+      {{if .AliveFail}}<div class="mt"><span class="tag bad" title="O2 rechazó la sesión el {{.AliveFail}}">caducada · renueva la sesión</span></div>
+      {{else if .AliveOK}}<div class="muted small mt" title="El proxy hace una petición cada pocos minutos para que O2 no cierre la sesión por inactividad">viva · comprobada {{.AliveOK}}</div>{{end}}
+     </td>
+     <td>
+      <div class="acts">
+       <button type="button" class="ghost" data-acc="{{.Name}}" onclick="fbExOpen(this.dataset.acc)" title="probar las credenciales y ver los ficheros en O2">Explorar</button>
+       <button type="button" class="ghost" onclick="document.getElementById('rn{{.I}}').showModal()">Renovar sesión</button>
+       <form method="post" action="/_admin/remove" onsubmit="return confirm('¿Eliminar la cuenta '+this.name.value+'?')"><input type="hidden" name="name" value="{{.Name}}"><button class="danger">Eliminar</button></form>
+      </div>
+      <dialog class="dlg" id="rn{{.I}}">
+       <header><b>Renovar sesión · {{.Name}}</b><form method="dialog"><button class="ghost" aria-label="cerrar">✕</button></form></header>
+       <div class="dbody">
+        <section class="hl"><h4>Con SMS <span class="tag ok">recomendado</span></h4>
+         <p class="muted small">El proxy inicia sesión en O2 por sí mismo: te llega un SMS y escribes el código en la pantalla siguiente.</p>
+         <form method="post" action="/_admin/login-start" class="drow"><input type="hidden" name="name" value="{{.Name}}">
+          <input name="phone" value="{{.PhoneDig}}" placeholder="tu número de O2" inputmode="tel" autocomplete="tel" required><button class="pri">Enviar SMS</button></form>
+        </section>
+        <section><h4>Con un HAR</h4>
+         <p class="muted small">Inicia sesión en <a href="{{$.O2Web}}" target="_blank" rel="noopener">O2 Cloud ↗</a> con DevTools abierto (pestaña Red) y exporta el HAR completo.</p>
+         <form method="post" action="/_admin/import-har" enctype="multipart/form-data" class="drow"><input type="hidden" name="name" value="{{.Name}}">
+          <input type="file" name="har" accept=".har,application/json" required><button>Subir HAR</button></form>
+        </section>
+        <details><summary class="link">Avanzado: pegar las cookies</summary>
+         <form method="post" action="/_admin/set-session" class="dcol"><input type="hidden" name="name" value="{{.Name}}">
+          <input class="mono" name="jsessionid" placeholder="JSESSIONID" required>
+          <input class="mono" name="validationkey" placeholder="validationKey" required>
+          <input class="mono" name="deviceid" placeholder="x-deviceid (web-…, necesario para subir)">
+          <input class="mono" name="plc" placeholder="PLC (opcional)">
+          <button>Guardar cookies</button></form>
+        </details>
+       </div>
+      </dialog>
+     </td>
+    </tr>
+   {{else}}
+    <tr><td colspan="4" class="muted" style="text-align:center;padding:24px">No hay cuentas todavía. Pulsa «Añadir cuenta nueva».</td></tr>
+   {{end}}
+   </tbody>
+  </table>
+  <details class="add mt">
+   <summary><span class="addhead">＋ Añadir cuenta nueva</span></summary>
+   <div class="addbody">
+    <p class="muted">Para <b>actualizar</b> la sesión de una cuenta existente sin perder su usuario y contraseña WebDAV, usa «Renovar sesión» en su fila.</p>
+    <h3>Opción A — Iniciar sesión con tu número (recomendado)</h3>
+    <p class="muted small">El proxy inicia sesión en O2 por sí mismo: te llega un SMS y escribes el código aquí.</p>
+    <form method="post" action="/_admin/login-start" class="inline">
+     <input name="name" placeholder="nombre de la cuenta" required>
+     <input name="phone" placeholder="tu número de O2" inputmode="tel" autocomplete="tel" required>
+     <button class="pri">Enviar SMS</button></form>
+    <h3>Opción B — Subir un HAR completo</h3>
+    <ol><li>F12 → pestaña <b>Network/Red</b>; exportación de HAR <b>completo</b> (con datos sensibles).</li>
+     <li>Inicia sesión en <a href="{{.O2Web}}" target="_blank" rel="noopener">cloud.o2online.es</a> (teléfono + SMS).</li>
+     <li>Guarda todo como HAR y súbelo:</li></ol>
+    <form method="post" action="/_admin/import-har" enctype="multipart/form-data" class="inline">
+     <input name="name" placeholder="nombre (opcional)"><input type="file" name="har" accept=".har,application/json" required>
+     <button class="pri">Importar HAR</button></form>
+    <h3>Opción C — Pegar las cookies</h3>
+    <p class="muted small">DevTools → Application/Almacenamiento → Cookies → cloud.o2online.es</p>
+    <form method="post" action="/_admin/set-session">
+     <div class="kv"><input name="name" placeholder="nombre"></div>
+     <div class="kv"><input class="mono" name="jsessionid" placeholder="JSESSIONID" size="46" required></div>
+     <div class="kv"><input class="mono" name="validationkey" placeholder="validationKey" size="46" required></div>
+     <div class="kv"><input class="mono" name="plc" placeholder="PLC (opcional)" size="46"></div>
+     <div class="kv"><input class="mono" name="deviceid" placeholder="x-deviceid (web-…, necesario para subir)" size="46"></div>
+     <button class="pri">Guardar cuenta</button></form>
+    <p class="note">El HAR y las cookies contienen tu sesión activa: trátalos como una contraseña. Todo se procesa en el proxy.</p>
+   </div>
+  </details>
+ </div>
+
+ <div class="card" id="fb-tx">
+  <h2>Transferencias <span class="badge" id="tx-count">0</span></h2>
+  <div class="bar small muted" id="tx-sum"></div>
+  <table class="tx mt"><thead><tr><th>Fichero</th><th>Estado</th><th>Progreso</th><th>Velocidad</th></tr></thead>
+   <tbody id="tx-rows"><tr><td colspan="4" class="muted" style="text-align:center;padding:14px">No hay transferencias en curso.</td></tr></tbody></table>
+  <details class="mt"><summary class="link">Últimas terminadas</summary>
+   <table class="tx mt"><thead><tr><th>Hora</th><th>Fichero</th><th>Tamaño</th><th>Resultado</th></tr></thead><tbody id="tx-recent"></tbody></table>
+  </details>
+ </div>
+ <script>
+ (function(){
+  function row(t){var pct=t.size>0?Math.min(100,100*t.done/t.size):0;
+   return '<tr><td class="mono small">'+fbEsc(t.path)+'<div class="muted small">'+t.kind+' · '+fbEsc(t.account)+'</div></td>'+
+    '<td>'+fbEsc(t.phase)+'</td><td><div class="prog"><i style="width:'+pct.toFixed(1)+'%"></i></div>'+
+    '<div class="muted small">'+fbHuman(t.done)+' de '+fbHuman(t.size)+'</div></td><td>'+(t.speed?fbHuman(t.speed)+'/s':'')+'</td></tr>';}
+  function render(d){
+   var a=d.active||[];document.getElementById('tx-count').textContent=a.length;
+   document.getElementById('tx-rows').innerHTML=a.length?a.map(row).join(''):'<tr><td colspan="4" class="muted" style="text-align:center;padding:14px">No hay transferencias en curso.</td></tr>';
+   document.getElementById('tx-sum').textContent='Subidas: '+d.up_ok+' bien, '+d.up_fail+' con error · Descargas: '+d.down_ok+' bien, '+d.down_fail+' con error · Paralelismo: '+
+    (d.max_up?d.max_up+' subidas':'subidas sin límite')+', '+(d.max_down?d.max_down+' descargas':'descargas sin límite');
+   document.getElementById('tx-recent').innerHTML=(d.recent||[]).map(function(t){
+    var ok=t.result==='ok';return '<tr><td class="small">'+t.ended+'</td><td class="mono small">'+fbEsc(t.path)+'<div class="muted small">'+t.kind+'</div></td><td class="small">'+fbHuman(t.size)+
+    (t.seconds>0&&ok?' · '+fbHuman(t.size/t.seconds)+'/s':'')+'</td><td>'+(ok?'<span class="tag ok">ok</span>':'<span class="tag bad">'+fbEsc(t.result)+'</span>')+'</td></tr>';}).join('');}
+  function poll(){if(document.hidden)return;fetch('/_admin/transfers.json').then(function(r){return r.json();}).then(render).catch(function(){});}
+  poll();setInterval(poll,2000);
+ })();
+ </script>
+
+ {{if .Accounts}}
+ <div class="card" id="fb-ex">
+  <h2>Explorador del servidor</h2>
+  <p class="muted small" style="margin:-6px 0 12px">Lista los ficheros directamente desde O2, sin caché: si carga, las credenciales de la cuenta siguen siendo válidas.</p>
+  <div class="bar">
+   <select id="fb-ex-acc">{{range .Accounts}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select>
+   <button type="button" class="pri" onclick="fbExLoad('')">Probar y listar</button>
+   <span id="fb-ex-status"></span>
+  </div>
+  <div id="fb-ex-crumbs" class="crumbs"></div>
+  <table class="mt" id="fb-ex-table" style="display:none"><thead><tr><th>Nombre</th><th>Tamaño</th><th>Modificado</th></tr></thead><tbody id="fb-ex-rows"></tbody></table>
+  <p class="muted small" id="fb-ex-note"></p>
+ </div>
+ <script>
+  function fbExLoad(path){var acc=document.getElementById('fb-ex-acc').value,st=document.getElementById('fb-ex-status');
+   st.className='muted small';st.textContent='Consultando al servidor…';
+   fetch('/_admin/browse.json?name='+encodeURIComponent(acc)+'&path='+encodeURIComponent(path))
+    .then(function(r){return r.json();}).then(fbExRender)
+    .catch(function(e){st.className='tag bad exstat';st.textContent='✗ No se pudo contactar con el proxy: '+e;});}
+  function fbExRender(d){var st=document.getElementById('fb-ex-status'),tb=document.getElementById('fb-ex-rows'),tbl=document.getElementById('fb-ex-table'),
+    note=document.getElementById('fb-ex-note'),cr=document.getElementById('fb-ex-crumbs');
+   if(!d.ok){var hint={'session':' — la sesión ha caducado: usa «Renovar sesión».','noauth':' — añade una sesión a la cuenta.','upstream':' — error de O2; reinténtalo en un rato.'}[d.kind]||'';
+    st.className='tag bad exstat';st.textContent='✗ '+(d.error||'error')+hint;tbl.style.display='none';note.textContent='';return;}
+   var p=d.path||'',s='✓ Credenciales válidas · comprobado a las '+d.checked;
+   if(d.storage&&d.storage.quota){s+=' · usado '+fbHuman(d.storage.used)+' de '+fbHuman(d.storage.quota);if(d.storage.trash)s+=' (+ '+fbHuman(d.storage.trash)+' en la papelera)';}
+   st.className='tag ok exstat';st.textContent=s;
+   var parts=p?p.split('/'):[],h='<a href="#" data-p="">raíz</a>',acc='';
+   for(var i=0;i<parts.length;i++){acc+=(i?'/':'')+parts[i];h+=' / <a href="#" data-p="'+fbEsc(acc)+'">'+fbEsc(parts[i])+'</a>';}
+   cr.innerHTML=h;var rows='';
+   if(p){rows+='<tr class="exdir"><td colspan="3"><a href="#" data-p="'+fbEsc(parts.slice(0,-1).join('/'))+'">⬑ ..</a></td></tr>';}
+   (d.folders||[]).forEach(function(f){var q=(p?p+'/':'')+f;rows+='<tr class="exdir"><td colspan="3"><a href="#" data-p="'+fbEsc(q)+'">📁 '+fbEsc(f)+'</a></td></tr>';});
+   (d.files||[]).forEach(function(f){rows+='<tr><td class="mono small">'+fbEsc(f.name)+'</td><td>'+fbHuman(f.size)+'</td><td class="small">'+fbEsc(fbDate(f.modified))+'</td></tr>';});
+   if(!rows)rows="<tr><td colspan='3' class='muted' style='text-align:center;padding:18px'>Carpeta vacía.</td></tr>";
+   tb.innerHTML=rows;tbl.style.display='';
+   var lim=d.limits?' — Límites de O2: ficheros de hasta '+fbHuman(d.limits.max_upload)+' · la papelera se vacía sola a los '+d.limits.trash_days+' días · máx. '+d.limits.folder_ops+' elementos por borrado de carpeta':'';
+   note.textContent=(d.folders||[]).length+' carpetas · '+d.total_files+' ficheros'+(d.total_files>(d.files||[]).length?' (mostrando los '+d.files.length+' primeros)':'')+lim;}
+  document.getElementById('fb-ex').addEventListener('click',function(ev){var a=ev.target.closest('a[data-p]');if(!a)return;ev.preventDefault();fbExLoad(a.getAttribute('data-p'));});
+  function fbExOpen(name){document.getElementById('fb-ex-acc').value=name;document.getElementById('fb-ex').scrollIntoView({behavior:'smooth'});fbExLoad('');}
+ </script>
+ {{end}}
+
+ <div class="card">
+  <details id="fb-log" ontoggle="if(this.open)fbLogPoll()">
+   <summary class="h2">Registro en vivo</summary>
+   <div class="bar">
+    <label class="chk"><input type="checkbox" id="log-warn"> solo avisos y errores</label>
+    <label class="chk"><input type="checkbox" id="log-follow" checked> seguir el final</label>
+    <span class="muted small">Últimas 800 líneas (INFO y superior). El log completo con DEBUG va al fichero <code>log_file</code>.</span>
+   </div>
+   <div class="logbox mt" id="log-box"></div>
+  </details>
+ </div>
+ <script>
+ (function(){var after=0,lines=[],box=document.getElementById('log-box'),warn=document.getElementById('log-warn');
+  function draw(){var html=lines.filter(function(l){return !warn.checked||l.level==='WARNING'||l.level==='ERROR';}).map(function(l){
+    var c=l.level==='WARNING'?'w':(l.level==='ERROR'?'e':'');return '<div class="'+c+'"><span class="t">'+l.t+'</span> '+fbEsc(l.text)+'</div>';}).join('');
+   box.innerHTML=html;if(document.getElementById('log-follow').checked)box.scrollTop=box.scrollHeight;}
+  window.fbLogPoll=function(){var d=document.getElementById('fb-log');if(!d.open||document.hidden)return;
+   fetch('/_admin/logs.json?after='+after).then(function(r){return r.json();}).then(function(n){if(!n.length)return;
+    after=n[n.length-1].n;lines=lines.concat(n).slice(-800);draw();}).catch(function(){});};
+  warn.addEventListener('change',draw);setInterval(window.fbLogPoll,3000);})();
+ </script>
+
+ <div class="card">
+  <h2>Ajustes</h2>
+  <div class="grid">
+   <form method="post" action="/_admin/settings">
+    <div class="kv"><b>Subidas a la vez</b> <input class="num" type="number" min="0" name="max_uploads" value="{{.MaxUp}}"> <span class="muted small">0 = sin límite</span></div>
+    <div class="kv"><b>Descargas a la vez</b> <input class="num" type="number" min="0" name="max_downloads" value="{{.MaxDown}}"> <span class="muted small">0 = sin límite</span></div>
+    <div class="kv"><b>Keepalive</b> <input class="num" type="number" min="0" name="keepalive" value="{{.Keepalive}}"> <span class="muted small">min (0 = off)</span></div>
+    <p class="muted small">Con un límite, las transferencias de más esperan su turno («en cola»): menos carga sobre O2 y menos cortes en copias grandes.</p>
+    <button class="pri">Guardar</button>
+   </form>
+   <div>
+    <div class="kv"><b>Telegram</b> {{if .TGOn}}<span class="tag ok">activado</span> <span class="muted small">chat {{.TGChat}}</span>{{else}}<span class="tag bad">desactivado</span>{{end}}</div>
+    <p class="muted small">Avisos al móvil cuando caduca la sesión de O2 o hay errores (como mucho uno de cada tipo por hora). Crea un bot con @BotFather y pon su token y tu chat id.</p>
+    <form method="post" action="/_admin/telegram" class="dcol">
+     <input class="mono" name="bot_token" placeholder="{{if .TGOn}}token del bot (vacío = no cambiar){{else}}token del bot{{end}}" autocomplete="off">
+     <input class="mono" name="chat_id" placeholder="chat id" value="{{.TGChat}}">
+     <div class="bar"><button class="pri" name="mode" value="on">Guardar y probar</button>{{if .TGOn}}<button class="danger" name="mode" value="off">Desactivar</button>{{end}}</div>
+    </form>
+   </div>
+  </div>
+ </div>
+</div>
+</body></html>

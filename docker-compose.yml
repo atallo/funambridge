@@ -1,11 +1,14 @@
 services:
   funambridge:
-    build: .
+    image: ghcr.io/atallo/funambridge:beta   # versión Go; "latest" = la última estable
+    # build: .                               # o constrúyela tú
     container_name: funambridge
     restart: unless-stopped
-    # Un único puerto (WebDAV + panel). Pon un proxy TLS delante para HTTPS;
-    # debe reenviar X-Forwarded-Proto / X-Forwarded-Host.
+    # Un único puerto (WebDAV + panel). Pon un proxy TLS delante para HTTPS.
     ports:
       - "9000:9000"
     volumes:
-      - ./data:/data        # contiene config.yaml (se crea desde el panel)
+      - ./data:/data        # config.yaml (se crea desde el panel), log, certificados
+    environment:
+      - TZ=Europe/Madrid
+    # La imagen ya trae su healthcheck ("/funambridge health"); no hace falta otro.

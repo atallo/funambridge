@@ -1,7 +1,9 @@
 name: Publicar imagen Docker
 
-# Se dispara al publicar una versión: un tag vX.Y.Z (también lo crea una Release
-# de GitHub). "workflow_dispatch" permite lanzarlo a mano.
+# Se dispara con un tag vX.Y.Z (también lo crea una Release de GitHub).
+#   v0.*            -> versión Python (legacy/python): etiquetas X.Y.Z, X.Y y latest
+#   v1.*-algo (beta) -> versión Go: etiquetas X.Y.Z-algo y beta (NO toca latest)
+#   v1.* final      -> versión Go: etiquetas X.Y.Z, X.Y y latest
 on:
   push:
     tags:
@@ -13,7 +15,20 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    if: ${{ !startsWith(github.ref_name, 'v0.') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Tests
+        run: go vet ./... && go test ./...
+
   build-and-push:
+    needs: [test]
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,13 +55,16 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=beta,enable=${{ contains(github.ref_name, '-') }}
 
       - name: Construir y publicar
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ startsWith(github.ref_name, 'v0.') && 'legacy/python' || '.' }}
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
