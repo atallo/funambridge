@@ -140,6 +140,12 @@ reinicia el contenedor (el proxy guarda un índice de cada carpeta).
 panel. Las configuraciones de versiones anteriores (con `s3:`) se siguen
 leyendo; al guardar se reescriben con `server:`.
 
+## La API de O2
+
+Cómo funciona por dentro el API de O2 Cloud (sesión, login por SMS,
+endpoints, subidas, errores y cambios recientes):
+[`docs/o2-sapi.md`](docs/o2-sapi.md).
+
 ## Estructura
 
 | Fichero                   | Función                                      |
