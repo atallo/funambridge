@@ -151,7 +151,30 @@ _STALE = (http.client.RemoteDisconnected, http.client.CannotSendRequest,
           http.client.BadStatusLine, ConnectionResetError, BrokenPipeError,
           ConnectionAbortedError)
 
-_SSL_CTX = ssl.create_default_context()
+def _urllib_tls_context():
+    """The exact TLS setup urllib uses (ALPN http/1.1 + post-handshake auth).
+    O2 sits behind CloudFront, which fingerprints the TLS handshake: a plain
+    ssl.create_default_context() (no ALPN) got an empty 401 from inside the
+    Docker image (Python 3.12 / Debian OpenSSL) while urllib's worked."""
+    mk = getattr(http.client, "_create_https_context", None)
+    if mk is not None:
+        try:
+            return mk(11)
+        except Exception:  # noqa: BLE001
+            pass
+    ctx = ssl.create_default_context()
+    ctx.set_alpn_protocols(["http/1.1"])
+    if getattr(ctx, "post_handshake_auth", None) is not None:
+        ctx.post_handshake_auth = True
+    return ctx
+
+
+_SSL_CTX = _urllib_tls_context()
+
+# Set once O2 is seen rejecting our kept-alive connections (empty 401/403 that
+# a plain urllib request does not get): from then on every request goes the
+# 0.1.x way, one urllib connection per request.
+_LEGACY = threading.Event()
 
 
 class _Pool:
@@ -210,6 +233,42 @@ class _CookieResp:
 
     def info(self):
         return self._r.msg
+
+
+class _Buffered:
+    """Stream-like view of an already-read body (error answers)."""
+
+    def __init__(self, status, headers, body):
+        import io
+        self.status, self.headers, self._b = status, headers, io.BytesIO(body)
+
+    def read(self, n=-1):
+        return self._b.read(n)
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class _UrlStream(_Buffered):
+    """Stream-like wrapper of a urllib response (legacy transport)."""
+
+    def __init__(self, resp):
+        self.status, self.headers, self._r = resp.status, resp.headers, resp
+
+    def read(self, n=-1):
+        return self._r.read(n) if n and n > 0 else self._r.read()
+
+    def close(self):
+        try:
+            self._r.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class Stream:
@@ -392,6 +451,64 @@ class FunambolClient:
         return _HdrView(hdrs), body
 
     def _send(self, method, url, data, headers, timeout, pooled=True, stream=False):
+        """One HTTP exchange (see _send_direct). If O2 answers an EMPTY 401/403
+        -- not a real "session expired", which comes with a body -- the request
+        is repeated over urllib, like 0.1.x did; if that one works, the whole
+        process switches to urllib for good (logged once)."""
+        if _LEGACY.is_set():
+            return self._send_urllib(method, url, data, headers, timeout, stream)
+        status, hdrs, out = self._send_direct(method, url, data, headers, timeout,
+                                              pooled=pooled, stream=stream)
+        if status not in (401, 403):
+            return status, hdrs, out
+        body = out.read() if stream else out
+        if stream:
+            out.close()
+        if not body.strip():
+            try:
+                st2, h2, o2 = self._send_urllib(method, url, data, headers,
+                                                timeout, stream)
+            except SapiError as e:
+                log.debug("SAPI .. legacy retry of %s %s failed: %s", method,
+                          _redact(url), e)
+            else:
+                if st2 < 400 and not _LEGACY.is_set():
+                    _LEGACY.set()
+                    log.warning("O2 rechaza las conexiones persistentes desde este "
+                                "equipo (401 vacío); se usa una conexión por "
+                                "petición, como en 0.1.x")
+                return st2, h2, o2
+        return status, hdrs, (_Buffered(status, hdrs, body) if stream else body)
+
+    def _send_urllib(self, method, url, data, headers, timeout, stream=False):
+        """The 0.1.x transport: urllib, cookies via the opener, one connection
+        per request (Connection: close)."""
+        if data is not None and hasattr(data, "seek"):
+            data.seek(0)
+        req = urllib.request.Request(url, data=data, method=method,
+                                     headers=headers)
+        try:
+            resp = self._opener.open(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            body = e.read()
+            return e.code, e.headers, (_Buffered(e.code, e.headers, body)
+                                       if stream else body)
+        except urllib.error.URLError as e:
+            raise SapiError(f"{method} {urllib.parse.urlsplit(url).path} -> "
+                            f"connection error: {e.reason}")
+        except OSError as e:
+            raise SapiError(f"{method} {urllib.parse.urlsplit(url).path} -> "
+                            f"I/O error: {e}")
+        if stream:
+            return resp.status, resp.headers, _UrlStream(resp)
+        try:
+            return resp.status, resp.headers, resp.read()
+        except OSError as e:
+            raise SapiError(f"{method} {urllib.parse.urlsplit(url).path} -> "
+                            f"I/O error: {e}")
+
+    def _send_direct(self, method, url, data, headers, timeout, pooled=True,
+                     stream=False):
         """One HTTP exchange with cookies. Kept-alive connection by default;
         `pooled=False` uses a fresh one (uploads: a big body must never be
         replayed blindly on a socket that turned out to be dead). Returns
