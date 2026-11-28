@@ -54,8 +54,7 @@ type pageData struct {
 	MaxUp       int
 	MaxDown     int
 	Keepalive   int
-	TGOn        bool
-	TGChat      string
+	AsMedia     bool
 }
 
 func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
@@ -94,8 +93,7 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 	cfg := s.R.Cfg
 	d := pageData{Version: version.Version, Fingerprint: sapi.FingerprintName(), O2Web: o2Web,
 		Admin: AdminPrefix, Msg: q.Get("msg"), Err: q.Get("err"), MaxUp: cfg.MaxUploads,
-		MaxDown: cfg.MaxDownloads, Keepalive: cfg.KeepaliveMinutes, TGOn: cfg.Telegram.Enabled(),
-		TGChat: cfg.Telegram.ChatID}
+		MaxDown: cfg.MaxDownloads, Keepalive: cfg.KeepaliveMinutes, AsMedia: cfg.UploadAsMedia}
 	if t := q.Get("login"); t != "" {
 		if pl := s.R.getPending(t); pl != nil {
 			d.Pending = &struct{ Token, Name, Masked string }{t, pl.name, "···" + pl.l.Phone[len(pl.l.Phone)-3:]}
@@ -373,38 +371,11 @@ func (s *Server) adminPost(w http.ResponseWriter, r *http.Request, p string) {
 		}
 		cfg.Lock()
 		cfg.MaxUploads, cfg.MaxDownloads, cfg.KeepaliveMinutes = up, down, ka
+		cfg.UploadAsMedia = f("as_media") == "1"
 		cfg.Unlock()
 		s.R.Tr.SetLimits(up, down)
 		s.R.save()
 		s.back(w, r, "Ajustes guardados (el keepalive nuevo se aplica al reiniciar)", "")
-	case "/telegram":
-		tok, chat := strings.TrimSpace(f("bot_token")), strings.TrimSpace(f("chat_id"))
-		cfg.Lock()
-		if f("mode") == "off" {
-			cfg.Telegram = config.Telegram{}
-		} else {
-			if tok != "" {
-				cfg.Telegram.BotToken = tok
-			}
-			if chat != "" {
-				cfg.Telegram.ChatID = chat
-			}
-		}
-		t := cfg.Telegram
-		cfg.Unlock()
-		s.R.TG.Configure(t.BotToken, t.ChatID)
-		s.R.save()
-		if f("mode") == "off" {
-			s.back(w, r, "Avisos de Telegram desactivados", "")
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		defer cancel()
-		if err := s.R.TG.Send(ctx, "avisos activados ✔"); err != nil {
-			s.back(w, r, "", "Telegram guardado, pero la prueba falló: "+err.Error())
-			return
-		}
-		s.back(w, r, "Telegram configurado: te ha llegado un mensaje de prueba", "")
 	default:
 		http.NotFound(w, r)
 	}

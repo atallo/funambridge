@@ -34,6 +34,9 @@ const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 type Client struct {
 	Base     string // https://cloud.o2online.es
 	DeviceID string
+	// AsMedia says whether to upload pictures/videos/audio with their media
+	// kind (O2 may then process them); nil or false = always as generic files.
+	AsMedia func() bool
 
 	sess     *config.Session // updated in place when O2 rotates the key
 	onChange func()          // persists the config after a rotation

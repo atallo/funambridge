@@ -120,15 +120,6 @@ func serve(cfg *config.Config, logFile string, args []string) {
 		mlog.Infof("log extendido (DEBUG) -> %s", logFile)
 	}
 	reg := server.NewRegistry(cfg)
-	logx.OnLog(func(l logx.Level, text string) {
-		if l == logx.Error {
-			key := text
-			if len(key) > 48 {
-				key = key[:48]
-			}
-			reg.TG.Alert("error:"+key, "error: "+text)
-		}
-	})
 	reg.StartKeepalive()
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	srv := &http.Server{Addr: addr, Handler: server.New(reg),
@@ -163,7 +154,6 @@ func serve(cfg *config.Config, logFile string, args []string) {
 	if cfg.MaxUploads > 0 || cfg.MaxDownloads > 0 {
 		mlog.Infof("  paralelismo: %d subidas / %d descargas a la vez (0 = sin límite)", cfg.MaxUploads, cfg.MaxDownloads)
 	}
-	reg.TG.Alert("start", "arrancado (v"+version.Version+")")
 
 	go func() {
 		ch := make(chan os.Signal, 1)

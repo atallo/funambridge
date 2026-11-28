@@ -16,7 +16,6 @@ import (
 	"github.com/atallo/funambridge/internal/davfs"
 	"github.com/atallo/funambridge/internal/login"
 	"github.com/atallo/funambridge/internal/logx"
-	"github.com/atallo/funambridge/internal/notify"
 	"github.com/atallo/funambridge/internal/sapi"
 	"github.com/atallo/funambridge/internal/store"
 	"github.com/atallo/funambridge/internal/transfers"
@@ -50,7 +49,6 @@ type pending struct {
 type Registry struct {
 	Cfg *config.Config
 	Tr  *transfers.Tracker
-	TG  *notify.Telegram
 
 	mu      sync.Mutex
 	live    map[string]*Live // by access key
@@ -60,10 +58,9 @@ type Registry struct {
 }
 
 func NewRegistry(cfg *config.Config) *Registry {
-	r := &Registry{Cfg: cfg, Tr: transfers.New(), TG: notify.New(), live: map[string]*Live{},
+	r := &Registry{Cfg: cfg, Tr: transfers.New(), live: map[string]*Live{},
 		alive: map[string]*aliveState{}, pending: map[string]*pending{}, stop: make(chan struct{})}
 	r.Tr.SetLimits(cfg.MaxUploads, cfg.MaxDownloads)
-	r.TG.Configure(cfg.Telegram.BotToken, cfg.Telegram.ChatID)
 	return r
 }
 
@@ -97,6 +94,7 @@ func (r *Registry) For(a *config.Account) *Live {
 		return l
 	}
 	c := sapi.New(a.BaseURL, a.DeviceID, &a.Session, func() { go r.save() })
+	c.AsMedia = func() bool { return r.Cfg.UploadAsMedia }
 	cache := store.NewCache(a.CacheSeconds, filepath.Join(r.baseDir(), a.AccessKey))
 	st := store.New(c, a.Name, r.Tr, r.spoolDir(), cache)
 	l := &Live{Acc: a, Store: st, FS: davfs.New(st), locks: webdav.NewMemLS(),
@@ -225,8 +223,6 @@ func (r *Registry) SessionDead(a *config.Account, err error) {
 	}
 	klog.Warnf("la sesión de O2 de '%s' ha caducado (viva %.1f h): renuévala desde el panel (%v)",
 		a.Name, lived, err)
-	r.TG.Alert("session:"+a.Name, "la sesión de O2 de '"+a.Name+
-		"' ha caducado. Renuévala en el panel («Renovar sesión» → SMS); hasta entonces las copias fallan.")
 }
 
 type AliveView struct {

@@ -36,10 +36,9 @@ transfers:
   max_uploads: 0
   max_downloads: 0
 
-# Avisos por Telegram (sesión caducada, errores). Vacío = desactivado.
-telegram:
-  bot_token: ""
-  chat_id: ""
+# false (por defecto): todo se sube como fichero genérico, tal cual.
+# true: las fotos, vídeos y audio se declaran como tales (O2 puede procesarlos).
+upload_as_media: false
 
 accounts:
   - name: personal

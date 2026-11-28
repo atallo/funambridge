@@ -56,13 +56,6 @@ type Account struct {
 func (a *Account) HasAuth() bool { return a.Session.IsSet() }
 func (a *Account) Phone() string { return a.OAuth.Msisdn }
 
-type Telegram struct {
-	BotToken string `yaml:"bot_token"`
-	ChatID   string `yaml:"chat_id"`
-}
-
-func (t Telegram) Enabled() bool { return t.BotToken != "" && t.ChatID != "" }
-
 type Config struct {
 	Path string `yaml:"-"`
 
@@ -77,8 +70,10 @@ type Config struct {
 	// straight through, like 0.x did.
 	MaxUploads   int
 	MaxDownloads int
-	Telegram     Telegram
-	Accounts     []*Account
+	// Upload pictures/videos/audio as such (O2 may process them as media).
+	// false (default): everything goes up as a generic file, untouched.
+	UploadAsMedia bool
+	Accounts      []*Account
 
 	mu sync.Mutex
 }
@@ -104,7 +99,7 @@ type file struct {
 	CacheDir         string     `yaml:"cache_dir"`
 	KeepaliveMinutes *int       `yaml:"keepalive_minutes"`
 	Transfers        *transfers `yaml:"transfers,omitempty"`
-	Telegram         Telegram   `yaml:"telegram"`
+	UploadAsMedia    bool       `yaml:"upload_as_media"`
 	Accounts         []*Account `yaml:"accounts"`
 }
 
@@ -154,7 +149,7 @@ func Load(path string) (*Config, error) {
 	if f.Transfers != nil {
 		c.MaxUploads, c.MaxDownloads = f.Transfers.MaxUploads, f.Transfers.MaxDownloads
 	}
-	c.Telegram = f.Telegram
+	c.UploadAsMedia = f.UploadAsMedia
 	for _, a := range f.Accounts {
 		if a == nil {
 			continue
@@ -185,7 +180,7 @@ func (c *Config) Save() error {
 	defer c.mu.Unlock()
 	ka := c.KeepaliveMinutes
 	f := file{LogFile: c.LogFile, CacheDir: c.CacheDir, KeepaliveMinutes: &ka,
-		Telegram: c.Telegram, Accounts: c.Accounts}
+		UploadAsMedia: c.UploadAsMedia, Accounts: c.Accounts}
 	f.Server = &struct {
 		Host string `yaml:"host"`
 		Port int    `yaml:"port"`

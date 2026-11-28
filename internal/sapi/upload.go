@@ -101,7 +101,10 @@ func (c *Client) Upload(ctx context.Context, u UploadReq) (*UploadResult, error)
 	if u.Attempts <= 0 {
 		u.Attempts = 8
 	}
-	kind := kindFor(u.Name)
+	kind := "file" // generic file: O2 stores the bytes as they are
+	if c.AsMedia != nil && c.AsMedia() {
+		kind = kindFor(u.Name)
+	}
 	res, err := c.uploadKind(ctx, u, kind)
 	if errors.Is(err, ErrUnsupported) && kind != "file" {
 		// e.g. a ".jpg" that is not really a picture: store it as a plain file

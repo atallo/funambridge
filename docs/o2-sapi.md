@@ -29,7 +29,13 @@ Todo va detrás de **CloudFront**, que mira la "huella" del *handshake* TLS.
 Con un contexto TLS sin ALPN (`ssl.create_default_context()` de Python en
 Linux), CloudFront responde **401 con cuerpo vacío** a todo. Con el contexto de
 `urllib` (ALPN `http/1.1` y *post-handshake auth*) funciona ✔. Desde Windows,
-ambos funcionaban. La versión 1.x (Go) presenta el ClientHello de **Chrome**
+ambos funcionaban.
+
+Lo que cuenta es el **ALPN** (que el saludo TLS diga qué protocolo quiere) ✔
+(28‑nov‑2026, prueba `go test -tags live -run LiveTLSVariants`): con el TLS
+estándar de Go, anunciando `http/1.1` o con el cliente por defecto (HTTP/2),
+todo funciona (sesión, listados, subida, descarga); **sin ALPN, CloudFront
+responde 401 vacío** a todo, incluso con una sesión válida. La versión 1.x (Go) presenta el ClientHello de **Chrome**
 (uTLS) con ALPN reducido a `http/1.1` ✔: con el ALPN de Chrome tal cual
 (`h2,http/1.1`) CloudFront negocia HTTP/2.
 

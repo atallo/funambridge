@@ -304,3 +304,16 @@ func TestNoCacheWaitsForValidation(t *testing.T) {
 		t.Fatalf("sin caché debería esperar a la validación (%s)", el)
 	}
 }
+
+func TestUploadsAreGenericByDefault(t *testing.T) {
+	e := setup(t, nil)
+	e.expect(201, "PUT", "/foto.jpg", rnd(1000))
+	if e.o2.Calls["/sapi/upload/file?save-metadata"] != 1 || e.o2.Calls["/sapi/upload/picture?save-metadata"] != 0 {
+		t.Fatalf("un .jpg debe subirse como fichero genérico: %v", e.o2.Calls)
+	}
+	m := setup(t, func(c *config.Config) { c.UploadAsMedia = true })
+	m.expect(201, "PUT", "/foto.jpg", rnd(1000))
+	if m.o2.Calls["/sapi/upload/picture?save-metadata"] != 1 {
+		t.Fatalf("con upload_as_media un .jpg se sube como foto: %v", m.o2.Calls)
+	}
+}

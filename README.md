@@ -60,11 +60,42 @@ Panel (`http://<host>:9000/_admin/`) → **«＋ Añadir cuenta nueva»**:
 Cada cuenta tiene su **usuario y contraseña WebDAV**. «Renovar sesión» en su
 fila renueva la sesión de O2 sin cambiarlos.
 
-## Conectar (Hyper Backup)
+## Conectar
 
-Destino **WebDAV**: servidor = la IP del equipo, puerto `9000`, usuario y
-contraseña = los de la cuenta en el panel. Otros clientes: `http://<host>:9000`
-(también se acepta `/dav/...`).
+En todos los casos: servidor = la IP o el nombre del equipo donde corre
+funambridge, puerto `9000`, y el **usuario y la contraseña de la cuenta** que
+muestra el panel. URL para otros clientes: `http://<host>:9000` (también vale
+`/dav/...`).
+
+**Synology Hyper Backup**: destino «WebDAV» → servidor, puerto `9000`, usuario,
+contraseña y la carpeta de destino.
+
+**WinSCP**: «Nuevo sitio» → protocolo **WebDAV**, cifrado **ninguno** (o
+«TLS/SSL implícito» si usas HTTPS), servidor, puerto `9000`, usuario y
+contraseña.
+
+**Unidad de red en Windows** (el cliente WebDAV que trae Windows, servicio
+«WebClient»). Una sola vez, en PowerShell como administrador:
+
+```powershell
+# permitir usuario y contraseña por HTTP (por defecto Windows solo lo admite con HTTPS)
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" BasicAuthLevel 2
+# subir el límite de tamaño de fichero (por defecto ~50 MB) al máximo (4 GB)
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" FileSizeLimitInBytes 0xffffffff
+Set-Service WebClient -StartupType Automatic
+Restart-Service WebClient
+```
+
+Y después, como usuario normal:
+
+```powershell
+net use O: http://<host>:9000/ /user:<usuario> <contraseña> /persistent:yes
+```
+
+(o en el Explorador: «Este equipo» → «Conectar a unidad de red» → carpeta
+`http://<host>:9000/` → marcar «Conectar con otras credenciales»). Microsoft ha
+anunciado que retirará el cliente WebDAV de Windows en el futuro; mientras
+exista, funciona así.
 
 ## Qué hace
 
@@ -118,8 +149,12 @@ O2 está detrás de CloudFront, que mira la huella TLS.
 
 **Sesión**: la *validation key* que rota O2 se adopta sola; cada
 `keepalive_minutes` (5) hay una petición ligera para que O2 no cierre la sesión
-por inactividad. Si aun así caduca, el panel lo marca y llega un aviso por
-Telegram.
+por inactividad. Si aun así caduca, el panel lo marca y el log lo avisa.
+
+**Tipo de subida**: por defecto **todo se sube como fichero genérico**, tal
+cual. Con `upload_as_media: true` (o la casilla del panel) las fotos, vídeos y
+audio se declaran como tales y O2 puede procesarlos (y rechazar los que no lo
+sean de verdad).
 
 **Paralelismo**: «Subidas / Descargas a la vez» en el panel (o `transfers:` en
 el config). **0 = sin límite** (por defecto); con límite, el resto espera «en
@@ -135,8 +170,7 @@ cola».
   local y cuándo caducan; los segundos se ajustan por cuenta.
 - **Registro en vivo** (INFO y superior; el log completo con DEBUG va a
   `log_file`).
-- **Ajustes**: paralelismo, keepalive y avisos de **Telegram** (crea un bot con
-  @BotFather; pon su token y tu chat id; «Guardar y probar» envía un mensaje).
+- **Ajustes**: paralelismo, keepalive y tipo de subida (genérico o multimedia).
 
 ## Línea de comandos
 
@@ -166,9 +200,14 @@ FUNAMBRIDGE_LIVE_CONFIG=config.yaml FUNAMBRIDGE_LIVE_ACCOUNT=prueba \
 | `internal/store` | rutas ⇄ O2, índice por carpeta, seguimiento de la validación |
 | `internal/davfs` | sistema de ficheros para `x/net/webdav` |
 | `internal/server` | servidor HTTP, WebDAV, panel, keepalive |
-| `internal/transfers`, `internal/notify`, `internal/logx` | transferencias, Telegram, log |
+| `internal/transfers`, `internal/logx` | transferencias, log |
 | `internal/repair` | `dedupe` |
 | `internal/fakeo2` | O2 simulado para los tests |
+
+## Proyectos similares
+
+- [MovistarWebDAVProxy](https://github.com/uniextra/MovistarWebDAVProxy):
+  WebDAV para Movistar Cloud y O2 Cloud.
 
 ## Aviso
 

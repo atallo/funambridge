@@ -17,7 +17,7 @@ func TestLoadExample(t *testing.T) {
 }
 
 // A config written by the Python versions (0.x): "s3:" instead of "server:",
-// fields the Go version ignores, no transfers/telegram.
+// fields the Go version ignores, no transfers.
 const pythonConfig = `s3:
   host: 0.0.0.0
   port: 9000

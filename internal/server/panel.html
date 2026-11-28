@@ -341,17 +341,10 @@ function fbDate(v){v=Number(v||0);if(!v)return '';if(v<1e11)v*=1000;return new D
     <div class="kv"><b>Descargas a la vez</b> <input class="num" type="number" min="0" name="max_downloads" value="{{.MaxDown}}"> <span class="muted small">0 = sin límite</span></div>
     <div class="kv"><b>Keepalive</b> <input class="num" type="number" min="0" name="keepalive" value="{{.Keepalive}}"> <span class="muted small">min (0 = off)</span></div>
     <p class="muted small">Con un límite, las transferencias de más esperan su turno («en cola»): menos carga sobre O2 y menos cortes en copias grandes.</p>
+    <div class="kv"><label class="chk" style="font-size:14px;color:var(--fg)"><input type="checkbox" name="as_media" value="1" {{if .AsMedia}}checked{{end}}> Subir fotos, vídeos y audio como multimedia</label></div>
+    <p class="muted small">Desactivado (recomendado): todo se sube a O2 como fichero genérico, tal cual. Activado: las fotos, vídeos y audio se declaran como tales y O2 puede procesarlos (y rechazar los que no lo sean de verdad).</p>
     <button class="pri">Guardar</button>
    </form>
-   <div>
-    <div class="kv"><b>Telegram</b> {{if .TGOn}}<span class="tag ok">activado</span> <span class="muted small">chat {{.TGChat}}</span>{{else}}<span class="tag bad">desactivado</span>{{end}}</div>
-    <p class="muted small">Avisos al móvil cuando caduca la sesión de O2 o hay errores (como mucho uno de cada tipo por hora). Crea un bot con @BotFather y pon su token y tu chat id.</p>
-    <form method="post" action="/_admin/telegram" class="dcol">
-     <input class="mono" name="bot_token" placeholder="{{if .TGOn}}token del bot (vacío = no cambiar){{else}}token del bot{{end}}" autocomplete="off">
-     <input class="mono" name="chat_id" placeholder="chat id" value="{{.TGChat}}">
-     <div class="bar"><button class="pri" name="mode" value="on">Guardar y probar</button>{{if .TGOn}}<button class="danger" name="mode" value="off">Desactivar</button>{{end}}</div>
-    </form>
-   </div>
   </div>
  </div>
 </div>
