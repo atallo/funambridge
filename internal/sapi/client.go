@@ -27,7 +27,7 @@ var log = logx.New("sapi")
 // apiCallTimeout bounds a whole non-streaming SAPI call (send + answer).
 const apiCallTimeout = 2 * time.Minute
 
-// UserAgent matches the Chrome TLS fingerprint the transport presents.
+// UserAgent sent to O2 (the web client's; tested Nov 2026).
 const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 	"(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
 

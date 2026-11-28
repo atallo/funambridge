@@ -11,9 +11,9 @@ Marcas usadas:
 
 - ✔ comprobado en vivo por funambridge;
 - ◐ visto en capturas o de forma parcial;
-- ↗ lo documenta otro proyecto
+- ⚠️ *pendiente de confirmar*: lo documenta otro proyecto
   ([MovistarWebDAVProxy](https://github.com/uniextra/MovistarWebDAVProxy),
-  Movistar Cloud / O2 Cloud); no lo hemos verificado.
+  Movistar Cloud / O2 Cloud) y funambridge aún no lo ha comprobado.
 
 ## 1. Hosts
 
@@ -35,9 +35,8 @@ Lo que cuenta es el **ALPN** (que el saludo TLS diga qué protocolo quiere) ✔
 (28‑nov‑2026, prueba `go test -tags live -run LiveTLSVariants`): con el TLS
 estándar de Go, anunciando `http/1.1` o con el cliente por defecto (HTTP/2),
 todo funciona (sesión, listados, subida, descarga); **sin ALPN, CloudFront
-responde 401 vacío** a todo, incluso con una sesión válida. La versión 1.x (Go) presenta el ClientHello de **Chrome**
-(uTLS) con ALPN reducido a `http/1.1` ✔: con el ALPN de Chrome tal cual
-(`h2,http/1.1`) CloudFront negocia HTTP/2.
+responde 401 vacío** a todo, incluso con una sesión válida. La versión 1.x
+(Go) usa el TLS estándar de Go anunciando `http/1.1`.
 
 ## 2. Sesión y autenticación
 
@@ -98,7 +97,7 @@ respuestas correctas también traen `data.validationkey` o una cookie
   **sin peticiones**; antes aguantaba días. La web hace consultas cada minuto
   más o menos y por eso no se nota. funambridge llama a `profile?action=get`
   cada `keepalive_minutes` (5).
-- **Duración máxima**: no la conocemos para O2. ↗ En Movistar Cloud la sesión
+- **Duración máxima**: no la conocemos para O2. ⚠️ *pendiente de confirmar*[^mwp]: En Movistar Cloud la sesión
   web caduca a las 24 h aunque haya actividad.
 - Una sesión caducada responde **HTTP 401 con una página HTML** (la del login),
   no JSON.
@@ -119,7 +118,7 @@ respuestas correctas también traen `data.validationkey` o una cookie
   en Base64, más `POST /sapi/login?action=login`. El servidor devuelve los tokens
   rotados en la cabecera `Authorization` de la respuesta. Obtener el token exige
   la red móvil. Queda en el código, pero no se usa.
-- ↗ **OAuth de la app de Windows**: `client_id` de escritorio de O2,
+- ⚠️ *pendiente de confirmar*[^mwp]: **OAuth de la app de Windows**: `client_id` de escritorio de O2,
   `redirect_uri=https://cloud.o2online.es/ui/html/clientoauth.html`. El código
   se canjea por `access_token` + `refresh_token` en
   `apiseg.telefonica.es/.../o2/cus/token`, y después se hace
@@ -219,7 +218,7 @@ que la sesión vive y como *keepalive*.
   cuenta (una lista plana, raíz incluida). Hay que filtrar por el campo
   `parentid` de cada carpeta ✔.
 - Cada carpeta trae, al menos, `id`, `name` y `parentid` ◐.
-- **FOL-1036** ✔ (código) ↗ (observado): no se puede borrar o mover de una vez
+- **FOL-1036** (⚠️ *pendiente de confirmar*[^mwp]; funambridge ya lo maneja): no se puede borrar o mover de una vez
   una carpeta con más elementos que `folders.softdelete-updates-limit`. Hay que
   vaciarla antes (ficheros uno a uno, subcarpetas recursivamente).
 
@@ -265,7 +264,7 @@ vacía ✔.
   `bytes 0-N/…`. Hay que pedir siempre rangos absolutos.
 - La URL se puede reutilizar durante un tiempo; funambridge la guarda 20 min.
   Si falla con 401/403/404, se pide otra.
-- ↗ Un fichero recién subido todavía en validación devuelve `COM-1005` hasta
+- ⚠️ *pendiente de confirmar*[^mwp]: Un fichero recién subido todavía en validación devuelve `COM-1005` hasta
   que O2 termina de procesarlo.
 
 **Borrar** ✔: `GET /sapi/media?action=softdelete&id=<id>` (va a la papelera).
@@ -313,7 +312,7 @@ SMS), siempre que `X-deviceid` sea el dispositivo de la sesión ✔ (28‑nov‑
    ```
 
    → `{"success":"Media uploaded successfully","id","lastupdate","status":"V","etag"}`.
-   Funciona también con 0 bytes ✔ (fichero nuevo; ↗ sobrescribir con 0 bytes da
+   Funciona también con 0 bytes ✔ (fichero nuevo; ⚠️ *pendiente de confirmar*[^mwp]: sobrescribir con 0 bytes da
    `MED-1049` y el original se pierde: hay que borrar y crear).
 3. **Reanudar** si el envío se corta ✔: preguntar cuánto tiene O2
 
@@ -353,7 +352,7 @@ parte "file": los bytes (application/octet-stream)
 
 - `status: "V"` = validando. **O2 procesa el fichero en segundo plano** (unos
   segundos; hasta ~30 s): mientras tanto puede no aparecer en los listados ni
-  descargarse (↗ `COM-1005`). Cuándo termina se sabe con:
+  descargarse (⚠️ *pendiente de confirmar*[^mwp]: `COM-1005`). Cuándo termina se sabe con:
 
   ```
   POST /sapi/media?action=get-validation-status
@@ -369,8 +368,8 @@ parte "file": los bytes (application/octet-stream)
   guardado el fichero igualmente; con el protocolo a) se ve con la consulta de
   reanudación.
 - Tras enviar el último byte, O2 puede tardar minutos en responder en ficheros
-  grandes (↗ 87 s con 153 MB).
-- Tamaño máximo: `sapi.upload.max-size-in-mb` (4 GB). ↗ Por encima, `MED-1020`.
+  grandes (⚠️ *pendiente de confirmar*[^mwp]: 87 s con 153 MB).
+- Tamaño máximo: `sapi.upload.max-size-in-mb` (4 GB). ⚠️ *pendiente de confirmar*[^mwp]: Por encima, `MED-1020`.
 
 ### 5.6 Copiar en la nube ✔
 
@@ -382,7 +381,9 @@ POST /sapi/media/file?action=copy
 → el id de la copia (en `data.id`, o dentro de `data.media`/`data.file`). Sin
 descargar ni volver a subir. La copia también pasa por validación.
 
-### 5.7 Renombrar o mover una carpeta ↗
+### 5.7 Renombrar o mover una carpeta
+
+⚠️ *pendiente de confirmar*[^mwp]
 
 `POST /sapi/media/folder?action=save` con `{"data":{"id":<id>,"name":"…","parentid":<nuevo padre>}}`.
 
@@ -391,15 +392,15 @@ descargar ni volver a subir. La copia también pasa por validación.
 | Código | Significado | Fuente |
 |---|---|---|
 | `SEC-1003` | validationKey rotada; la nueva va en `error.data` | ✔ |
-| `FOL-1035` | límite de carpetas de la cuenta (la papelera cuenta) | ↗ |
-| `FOL-1036` | demasiados elementos para borrar o mover una carpeta de una vez | ↗ |
-| `MED-1017` | el fichero aún se está validando y no se puede tocar | ↗ |
-| `MED-1020` | fichero demasiado grande | ↗ |
-| `MED-1048` | rechazo por tamaño durante la subida | ↗ |
-| `MED-1049` | sobrescribir con 0 bytes (el original se pierde) | ↗ |
-| `MED-1050` | contenido no admitido para su tipo (p. ej. un `.jpg` que no es una imagen) | ↗ |
-| `MED-1000` | error genérico del servidor de medios | ↗ |
-| `COM-1005` | descarga de un fichero aún no procesado | ↗ |
+| `FOL-1035` | límite de carpetas de la cuenta (la papelera cuenta) | ⚠️ pendiente de confirmar[^mwp] |
+| `FOL-1036` | demasiados elementos para borrar o mover una carpeta de una vez | ⚠️ pendiente de confirmar[^mwp] |
+| `MED-1017` | el fichero aún se está validando y no se puede tocar | ⚠️ pendiente de confirmar[^mwp] |
+| `MED-1020` | fichero demasiado grande | ⚠️ pendiente de confirmar[^mwp] |
+| `MED-1048` | rechazo por tamaño durante la subida | ⚠️ pendiente de confirmar[^mwp] |
+| `MED-1049` | sobrescribir con 0 bytes (el original se pierde) | ⚠️ pendiente de confirmar[^mwp] |
+| `MED-1050` | contenido no admitido para su tipo (p. ej. un `.jpg` que no es una imagen) | ⚠️ pendiente de confirmar[^mwp] |
+| `MED-1000` | error genérico del servidor de medios | ⚠️ pendiente de confirmar[^mwp] |
+| `COM-1005` | descarga de un fichero aún no procesado | ⚠️ pendiente de confirmar[^mwp] |
 
 ## 7. Cómo lo usa funambridge (WebDAV → SAPI)
 
@@ -418,7 +419,7 @@ Versión 1.x (Go):
 | *keepalive* | `profile?action=get` cada 5 min |
 | límites | `system/information` (caché de 6 h) |
 
-Transporte: uTLS con la huella de Chrome y HTTP/1.1, conexiones reutilizadas
+Transporte: TLS estándar de Go con ALPN `http/1.1`, conexiones reutilizadas
 (las subidas, sin reutilizar), `TCP_USER_TIMEOUT` de 60 s en Linux.
 
 La 0.2.x (Python) usaba la subida multipart (b) y borraba antes de subir; la
@@ -433,3 +434,7 @@ caché de escritura es la misma idea.
 | nov‑2026 | La sesión muere tras ~1–2 h sin peticiones | 0.1.11 (*keepalive*) |
 | nov‑2026 | CloudFront rechaza clientes TLS sin ALPN (visto desde Docker/Linux) | 0.2.1 |
 | 28‑nov‑2026 | Comprobado que la sesión web admite el protocolo de subida de la app de Windows (sobrescribir, reanudar, validación) | 1.0.0-beta.1 (Go) |
+
+[^mwp]: Según [MovistarWebDAVProxy](https://github.com/uniextra/MovistarWebDAVProxy),
+    un proyecto similar para Movistar Cloud / O2 Cloud. funambridge no lo ha
+    comprobado todavía.

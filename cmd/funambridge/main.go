@@ -236,7 +236,7 @@ func probe(cfg *config.Config, args []string) {
 	if err := c.Profile(ctx); err != nil {
 		die("sesión: NO VÁLIDA (%v)", err)
 	}
-	fmt.Println("sesión: VÁLIDA · huella TLS:", sapi.FingerprintName())
+	fmt.Println("sesión: VÁLIDA · conexión:", sapi.FingerprintName())
 	fmt.Printf("límites de O2: %+v · subidas en %s\n", c.Limits(ctx), c.UploadBase(ctx))
 	if st, err := c.Storage(ctx); err == nil {
 		fmt.Printf("espacio: %.1f GB usados de %.1f GB (papelera %.1f GB)\n",

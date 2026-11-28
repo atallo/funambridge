@@ -120,7 +120,7 @@ function fbDate(v){v=Number(v||0);if(!v)return '';if(v<1e11)v*=1000;return new D
     <div class="kv"><b>HTTPS</b> <span id="cx-tls"></span></div>
    </div>
   </div>
-  <p class="muted small" style="margin:10px 0 0">Conexión con O2: huella TLS {{.Fingerprint}}.</p>
+  <p class="muted small" style="margin:10px 0 0">Conexión con O2: {{.Fingerprint}}.</p>
  </div>
  <script>(function(){var https=location.protocol==='https:',port=location.port||(https?'443':'80');
   var set=function(i,v){var e=document.getElementById(i);if(e)e.textContent=v;};

@@ -48,7 +48,7 @@ func TestLive(t *testing.T) {
 	if err := c.Profile(ctx); err != nil {
 		t.Fatalf("profile: %v", err)
 	}
-	t.Logf("sesión OK con huella %s", FingerprintName())
+	t.Logf("sesión OK (%s)", FingerprintName())
 	lim := c.Limits(ctx)
 	t.Logf("límites: %+v, subida: %s", lim, c.UploadBase(ctx))
 	st, err := c.Storage(ctx)

@@ -141,11 +141,12 @@ la sesión caducada se responden `503` + `Retry-After`, para que Hyper Backup
 reintente en vez de dar la copia por rota; `413`/`415` cuando O2 rechaza el
 fichero por tamaño o contenido.
 
-**Conexión con O2**: huella TLS de **Chrome** (uTLS) con HTTP/1.1, conexiones
+**Conexión con O2**: TLS estándar de Go con HTTP/1.1 (anunciado por ALPN), conexiones
 reutilizadas, y en Linux las conexiones muertas se detectan en 60 s
 (`TCP_USER_TIMEOUT`). Una descarga que pasa 60 s sin recibir nada de O2 se corta
 (el cliente reintenta) y las llamadas pequeñas al API tienen un límite de 2 min.
-O2 está detrás de CloudFront, que mira la huella TLS.
+O2 está detrás de CloudFront, que rechaza (401 vacío) las conexiones TLS que no
+anuncian protocolo.
 
 **Sesión**: la *validation key* que rota O2 se adopta sola; cada
 `keepalive_minutes` (5) hay una petición ligera para que O2 no cierre la sesión
@@ -195,7 +196,7 @@ FUNAMBRIDGE_LIVE_CONFIG=config.yaml FUNAMBRIDGE_LIVE_ACCOUNT=prueba \
 |---|---|
 | `cmd/funambridge` | CLI |
 | `internal/config` | config YAML (compatible con 0.x) |
-| `internal/sapi` | cliente de O2: sesión, transporte uTLS, endpoints, subidas |
+| `internal/sapi` | cliente de O2: sesión, transporte, endpoints, subidas |
 | `internal/login`, `internal/har` | login por SMS, import de HAR |
 | `internal/store` | rutas ⇄ O2, índice por carpeta, seguimiento de la validación |
 | `internal/davfs` | sistema de ficheros para `x/net/webdav` |
